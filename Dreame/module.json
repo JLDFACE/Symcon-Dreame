@@ -1,0 +1,16 @@
+{
+  "id": "{86911C77-389D-451D-9CA5-344EC01BB092}",
+  "name": "Dreame Robot Vacuum",
+  "type": 3,
+  "vendor": "Dreame",
+  "aliases": [
+    "Dreame",
+    "Dreame X50",
+    "Dreame X50 Ultra",
+    "Saugroboter"
+  ],
+  "parentRequirements": [],
+  "childRequirements": [],
+  "implemented": [],
+  "prefix": "DREAME"
+}

@@ -1,0 +1,12 @@
+{
+  "id": "{346054A1-DEA0-49A7-8537-ACE5F32B40B5}",
+  "author": "FACE GmbH / JLD",
+  "name": "Symcon-Dreame",
+  "url": "https://github.com/JLDFACE/Symcon-Dreame",
+  "version": "1.0",
+  "build": 1,
+  "date": 20260723,
+  "compatibility": {
+    "version": "7.0"
+  }
+}

@@ -1,0 +1,75 @@
+{
+  "elements": [
+    {
+      "type": "ExpansionPanel",
+      "caption": "Dreame-Konto (dreamehome)",
+      "items": [
+        { "type": "Label", "caption": "Zugangsdaten deiner dreamehome-App. Der X50 ist nur ueber die Dreame-Cloud steuerbar (kein lokaler Direktzugriff)." },
+        { "type": "ValidationTextBox", "name": "Email", "caption": "E-Mail / Benutzer" },
+        { "type": "PasswordTextBox", "name": "Password", "caption": "Passwort" },
+        {
+          "type": "Select",
+          "name": "Region",
+          "caption": "Region / Server",
+          "options": [
+            { "caption": "Europa (eu)", "value": "eu" },
+            { "caption": "China (cn)", "value": "cn" },
+            { "caption": "USA (us)", "value": "us" },
+            { "caption": "Singapur (sg)", "value": "sg" },
+            { "caption": "Korea (kr)", "value": "kr" }
+          ]
+        },
+        { "type": "NumberSpinner", "name": "UpdateInterval", "caption": "Status-Abfrage alle (Sek.)", "minimum": 10, "maximum": 3600 },
+        { "type": "NumberSpinner", "name": "FastAfterChange", "caption": "Schnell-Poll nach Aktion (Sek.)", "minimum": 5, "maximum": 120 },
+        { "type": "Button", "caption": "Login testen", "onClick": "DREAME_TestLogin($id);" }
+      ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Karten & Raeume",
+      "items": [
+        { "type": "Label", "caption": "Liest Etagen und Raeume aus der Karte ein und fuellt das Dropdown 'Raum reinigen'. Nach Umbau/Neukartierung erneut einlesen." },
+        { "type": "Button", "caption": "Karten & Raeume einlesen", "onClick": "DREAME_DiscoverMapsAndRooms($id);" },
+        {
+          "type": "List",
+          "name": "DiscoveredRooms",
+          "caption": "Erkannte Raeume",
+          "rowCount": 12,
+          "add": false,
+          "delete": false,
+          "columns": [
+            { "caption": "Etage", "name": "floor", "width": "120px" },
+            { "caption": "Karte", "name": "mapid", "width": "60px" },
+            { "caption": "Segment-ID", "name": "seg", "width": "90px" },
+            { "caption": "Raum", "name": "name", "width": "auto" }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Steuerung / Test",
+      "items": [
+        {
+          "type": "RowLayout",
+          "items": [
+            { "type": "Button", "caption": "Alles reinigen", "onClick": "DREAME_CleanAll($id);" },
+            { "type": "Button", "caption": "Pause", "onClick": "DREAME_Pause($id);" },
+            { "type": "Button", "caption": "Stopp", "onClick": "DREAME_Stop($id);" },
+            { "type": "Button", "caption": "Zur Basis", "onClick": "DREAME_Charge($id);" },
+            { "type": "Button", "caption": "Orten (Piepen)", "onClick": "DREAME_Locate($id);" }
+          ]
+        },
+        { "type": "Button", "caption": "Status jetzt abfragen", "onClick": "DREAME_UpdateStatus($id);" }
+      ]
+    }
+  ],
+  "actions": [
+    { "type": "Label", "caption": "Statusvariablen: Zustand, Akku, Fehler, Reinigungszeit/-flaeche. Steuerung ueber die Variablen 'Aktion' und 'Raum reinigen'." }
+  ],
+  "status": [
+    { "code": 102, "icon": "active", "caption": "Aktiv" },
+    { "code": 104, "icon": "inactive", "caption": "Inaktiv" },
+    { "code": 201, "icon": "error", "caption": "E-Mail/Passwort nicht konfiguriert" }
+  ]
+}
