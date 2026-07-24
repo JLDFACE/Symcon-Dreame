@@ -1,4 +1,4 @@
-# Symcon-DreameX50
+# Symcon-Dreame
 
 IP-Symcon-Modul zur Steuerung von **Dreame-Saugrobotern** (getestet mit **X50 Ultra Complete**, `dreame.vacuum.r2532a`) über die Dreame-eigene Cloud (**dreamehome**).
 
@@ -15,8 +15,8 @@ IP-Symcon-Modul zur Steuerung von **Dreame-Saugrobotern** (getestet mit **X50 Ul
 
 ## Einrichtung
 
-1. Ordner `Symcon-DreameX50` als Modul hinzufügen (Module Control → per Git-URL oder lokal in den `modules`-Ordner legen).
-2. Neue Instanz **„Dreame Robot Vacuum"** anlegen.
+1. Modul hinzufügen (Module Control → per Git-URL `https://github.com/JLDFACE/Symcon-Dreame` oder lokal in den `modules`-Ordner legen).
+2. Neue Instanz **„Dreame"** anlegen.
 3. E-Mail + Passwort deines dreamehome-Kontos eintragen, Region wählen (DE = `eu`).
 4. **„Login testen"** → sollte Gerät + did anzeigen.
 5. **„Karten & Räume einlesen"** → füllt das Dropdown *Raum reinigen* und die Liste in der Konfig.
