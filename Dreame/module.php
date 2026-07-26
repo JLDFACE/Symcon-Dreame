@@ -45,6 +45,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeString('Device', '');      // {did,model,host}
         $this->RegisterAttributeString('MapsRooms', '');   // [{map_id,floor,rooms:[{seg,name}]}]
         $this->RegisterAttributeInteger('SelectedMap', -1);
+        $this->RegisterAttributeInteger('RoomCleaning', 0); // 1, sobald nach einer Raumauswahl aktiv gereinigt wurde
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -60,7 +61,7 @@ class DREAME extends IPSModule
         $this->RegisterVariableInteger('Battery', 'Akku', '~Battery.100', 40);
         $this->RegisterVariableString('Fehler', 'Fehler', '~TextBox', 50);
         $this->RegisterVariableInteger('CleaningTime', 'Reinigungszeit (min)', '', 60);
-        $this->RegisterVariableFloat('CleaningArea', 'Gereinigte Flaeche (m2)', '', 70);
+        $this->RegisterVariableFloat('CleaningArea', 'Gereinigte Fläche (m²)', '', 70);
 
         // ---- Steuerung: Aktion (Dropdown) ----
         $this->RegisterProfileInteger('DREAME.Action', 'Execute', '', '', 0, 0, 0);
@@ -78,7 +79,7 @@ class DREAME extends IPSModule
         // ---- Steuerung: Raum (Dropdown, dynamisch) ----
         $roomProfile = $this->RoomProfileName();
         $this->RegisterProfileInteger($roomProfile, 'Move', '', '', 0, 0, 0);
-        $this->SetAssociations($roomProfile, [[0, '— Raum waehlen —', '', -1]]);
+        $this->SetAssociations($roomProfile, [[0, '— Raum wählen —', '', -1]]);
         $this->RegisterVariableInteger('Raum', 'Raum reinigen', $roomProfile, 90);
         $this->EnableAction('Raum');
 
@@ -97,6 +98,12 @@ class DREAME extends IPSModule
         // Raumprofil aus gespeicherten Karten wiederherstellen (falls vorhanden)
         $this->RebuildRoomProfile();
 
+        // Alte ASCII-Variablennamen auf Umlaute migrieren (nur solange noch Standardname)
+        $areaId = @$this->GetIDForIdent('CleaningArea');
+        if ($areaId && IPS_GetName($areaId) == 'Gereinigte Flaeche (m2)') {
+            IPS_SetName($areaId, 'Gereinigte Fläche (m²)');
+        }
+
         $email = trim($this->ReadPropertyString('Email'));
         $pass  = $this->ReadPropertyString('Password');
         if ($email == '' || $pass == '') {
@@ -112,7 +119,23 @@ class DREAME extends IPSModule
     {
         $form = json_decode(file_get_contents(__DIR__ . '/form.json'), true);
 
-        // Entdeckte Raeume als Liste in die Konfig einblenden
+        // Platzhalter-Element "DiscoveredRooms" mit Werten fuellen
+        $rows = $this->BuildRoomRows();
+        foreach ($form['elements'] as &$el) {
+            if (isset($el['items'])) {
+                foreach ($el['items'] as &$it) {
+                    if (isset($it['name']) && $it['name'] == 'DiscoveredRooms') {
+                        $it['values'] = $rows;
+                    }
+                }
+            }
+        }
+        return json_encode($form);
+    }
+
+    // Baut die Zeilen fuer die Liste "Erkannte Raeume" aus den gespeicherten Karten.
+    private function BuildRoomRows()
+    {
         $rows = [];
         $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
         if (is_array($maps)) {
@@ -127,17 +150,7 @@ class DREAME extends IPSModule
                 }
             }
         }
-        // Platzhalter-Element "DiscoveredRooms" mit Werten fuellen
-        foreach ($form['elements'] as &$el) {
-            if (isset($el['items'])) {
-                foreach ($el['items'] as &$it) {
-                    if (isset($it['name']) && $it['name'] == 'DiscoveredRooms') {
-                        $it['values'] = $rows;
-                    }
-                }
-            }
-        }
-        return json_encode($form);
+        return $rows;
     }
 
     public function RequestAction($Ident, $Value)
@@ -185,7 +198,7 @@ class DREAME extends IPSModule
             echo "Login OK, aber kein Saugroboter im Konto gefunden.";
             return false;
         }
-        echo "FEHLER - Login fehlgeschlagen. Bitte E-Mail/Passwort/Region pruefen.";
+        echo "FEHLER - Login fehlgeschlagen. Bitte E-Mail/Passwort/Region prüfen.";
         return false;
     }
 
@@ -213,11 +226,13 @@ class DREAME extends IPSModule
 
             $this->WriteAttributeString('MapsRooms', json_encode($maps));
             $this->RebuildRoomProfile();
+            // Liste "Erkannte Raeume" sofort im offenen Formular aktualisieren
+            $this->UpdateFormField('DiscoveredRooms', 'values', json_encode($this->BuildRoomRows()));
             $this->SetOnline(true, '');
 
             $cnt = 0;
             foreach ($maps as $m) $cnt += count($m['rooms']);
-            $this->LogMessage('Karten/Raeume eingelesen: ' . count($maps) . ' Etage(n), ' . $cnt . ' Raeume.', KL_NOTIFY);
+            $this->LogMessage('Karten/Räume eingelesen: ' . count($maps) . ' Etage(n), ' . $cnt . ' Räume.', KL_NOTIFY);
             echo 'OK - ' . count($maps) . " Etage(n) eingelesen:\n";
             foreach ($maps as $m) {
                 echo '  ' . $m['floor'] . ' (map_id ' . $m['map_id'] . '): ';
@@ -292,7 +307,11 @@ class DREAME extends IPSModule
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
 
-            if (isset($p['2.1'])) $this->SetValueStringSafe('Zustand', $this->StateText(intval($p['2.1'])));
+            if (isset($p['2.1'])) {
+                $state = intval($p['2.1']);
+                $this->SetValueStringSafe('Zustand', $this->StateText($state));
+                $this->HandleRoomAutoReset($state);
+            }
             if (isset($p['2.2'])) $this->SetValueStringSafe('Fehler', $this->ErrorText(intval($p['2.2'])));
             if (isset($p['3.1'])) $this->SetValueIntegerSafe('Battery', intval($p['3.1']));
             if (isset($p['4.2'])) $this->SetValueIntegerSafe('CleaningTime', intval($p['4.2']));
@@ -507,10 +526,10 @@ class DREAME extends IPSModule
     private function RoomName($type, $index, $segId)
     {
         $names = [
-            1 => 'Wohnzimmer', 2 => 'Schlafzimmer', 3 => 'Arbeitszimmer', 4 => 'Kueche',
+            1 => 'Wohnzimmer', 2 => 'Schlafzimmer', 3 => 'Arbeitszimmer', 4 => 'Küche',
             5 => 'Esszimmer', 6 => 'Badezimmer', 7 => 'Balkon', 8 => 'Flur', 9 => 'Hauswirtschaftsraum',
-            10 => 'Ankleide', 11 => 'Besprechungsraum', 12 => 'Buero', 13 => 'Fitnessbereich',
-            14 => 'Freizeitbereich', 15 => 'Gaestezimmer'
+            10 => 'Ankleide', 11 => 'Besprechungsraum', 12 => 'Büro', 13 => 'Fitnessbereich',
+            14 => 'Freizeitbereich', 15 => 'Gästezimmer'
         ];
         if ($type > 0 && isset($names[$type])) {
             $n = $names[$type];
@@ -534,7 +553,7 @@ class DREAME extends IPSModule
         $profile = $this->RoomProfileName();
         if (!IPS_VariableProfileExists($profile)) return;
 
-        $assocs = [[0, '— Raum waehlen —', '', -1]];
+        $assocs = [[0, '— Raum wählen —', '', -1]];
         $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
         $multi = is_array($maps) && count($maps) > 1;
         if (is_array($maps)) {
@@ -547,6 +566,36 @@ class DREAME extends IPSModule
             }
         }
         $this->SetAssociations($profile, $assocs);
+    }
+
+    // Setzt die Auswahl "Raum reinigen" nach Abschluss einer Raumreinigung auf 0 zurueck.
+    // Ablauf: Sobald der Roboter nach einer Raumauswahl aktiv reinigt (unterwegs), wird
+    // gemerkt, dass eine Reinigung laeuft. Kehrt er danach an die Basis zurueck bzw. ist
+    // fertig (Leerlauf/Laedt/Trocknen/geladen), wird die Auswahl geleert.
+    private function HandleRoomAutoReset($state)
+    {
+        // Zustaende, in denen der Roboter unterwegs bzw. mitten in der Reinigung ist
+        $busy = [1, 5, 7, 9, 10, 11, 12, 18, 21, 23, 27, 30, 121, 122];
+        // Zustaende, die "an der Basis / fertig" bedeuten -> Auswahl darf geleert werden
+        $done = [2, 6, 8, 13, 14, 22, 24];
+
+        $current = GetValueInteger($this->GetIDForIdent('Raum'));
+
+        if (in_array($state, $busy, true)) {
+            // Es wurde ein Raum gewaehlt und der Roboter arbeitet -> Reinigung laeuft
+            if ($current > 0 && $this->ReadAttributeInteger('RoomCleaning') != 1) {
+                $this->WriteAttributeInteger('RoomCleaning', 1);
+            }
+            return;
+        }
+
+        if (in_array($state, $done, true)) {
+            // Reinigung war aktiv und ist nun beendet -> Auswahl zuruecksetzen
+            if ($this->ReadAttributeInteger('RoomCleaning') == 1) {
+                if ($current != 0) $this->SetValueIntegerSafe('Raum', 0);
+                $this->WriteAttributeInteger('RoomCleaning', 0);
+            }
+        }
     }
 
     // =========================================================================
@@ -635,12 +684,12 @@ class DREAME extends IPSModule
     {
         $s = [
             -1 => 'Unbekannt', 1 => 'Saugen', 2 => 'Leerlauf', 3 => 'Pausiert', 4 => 'Fehler',
-            5 => 'Rueckkehr zur Basis', 6 => 'Laedt', 7 => 'Wischen', 8 => 'Trocknen', 9 => 'Moppwaesche',
-            10 => 'Rueckkehr zur Waesche', 11 => 'Karte wird erstellt', 12 => 'Saugen & Wischen',
-            13 => 'Vollstaendig geladen', 14 => 'Aktualisierung', 21 => 'Moppwaesche pausiert',
+            5 => 'Rückkehr zur Basis', 6 => 'Lädt', 7 => 'Wischen', 8 => 'Trocknen', 9 => 'Moppwäsche',
+            10 => 'Rückkehr zur Wäsche', 11 => 'Karte wird erstellt', 12 => 'Saugen & Wischen',
+            13 => 'Vollständig geladen', 14 => 'Aktualisierung', 21 => 'Moppwäsche pausiert',
             22 => 'Selbstentleerung', 23 => 'Fernsteuerung', 24 => 'Intelligentes Laden',
-            27 => 'Punktreinigung', 30 => 'Stationsreinigung', 121 => 'Faehrt in die Basis',
-            122 => 'Verlaesst die Basis'
+            27 => 'Punktreinigung', 30 => 'Stationsreinigung', 121 => 'Fährt in die Basis',
+            122 => 'Verlässt die Basis'
         ];
         return isset($s[$code]) ? ($s[$code] . ' (' . $code . ')') : ('Status ' . $code);
     }
@@ -649,7 +698,7 @@ class DREAME extends IPSModule
     {
         if ($code == 0) return 'kein Fehler';
         $e = [
-            101 => 'Staubbehaelter voll', 105 => 'Frischwassertank pruefen', 106 => 'Schmutzwassertank voll',
+            101 => 'Staubbehälter voll', 105 => 'Frischwassertank prüfen', 106 => 'Schmutzwassertank voll',
             107 => 'Frischwassertank leer', 108 => 'Schmutzwassertank voll', 109 => 'Schmutzwasserkanal blockiert'
         ];
         return isset($e[$code]) ? ($e[$code] . ' (' . $code . ')') : ('Fehler ' . $code);

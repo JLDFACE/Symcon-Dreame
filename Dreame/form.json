@@ -4,7 +4,7 @@
       "type": "ExpansionPanel",
       "caption": "Dreame-Konto (dreamehome)",
       "items": [
-        { "type": "Label", "caption": "Zugangsdaten deiner dreamehome-App. Der X50 ist nur ueber die Dreame-Cloud steuerbar (kein lokaler Direktzugriff)." },
+        { "type": "Label", "caption": "Zugangsdaten deiner dreamehome-App. Der X50 ist nur über die Dreame-Cloud steuerbar (kein lokaler Direktzugriff)." },
         { "type": "ValidationTextBox", "name": "Email", "caption": "E-Mail / Benutzer" },
         { "type": "PasswordTextBox", "name": "Password", "caption": "Passwort" },
         {
@@ -26,14 +26,14 @@
     },
     {
       "type": "ExpansionPanel",
-      "caption": "Karten & Raeume",
+      "caption": "Karten & Räume",
       "items": [
-        { "type": "Label", "caption": "Liest Etagen und Raeume aus der Karte ein und fuellt das Dropdown 'Raum reinigen'. Nach Umbau/Neukartierung erneut einlesen." },
-        { "type": "Button", "caption": "Karten & Raeume einlesen", "onClick": "DREAME_DiscoverMapsAndRooms($id);" },
+        { "type": "Label", "caption": "Liest Etagen und Räume aus der Karte ein und füllt das Dropdown 'Raum reinigen'. Nach Umbau/Neukartierung erneut einlesen." },
+        { "type": "Button", "caption": "Karten & Räume einlesen", "onClick": "DREAME_DiscoverMapsAndRooms($id);" },
         {
           "type": "List",
           "name": "DiscoveredRooms",
-          "caption": "Erkannte Raeume",
+          "caption": "Erkannte Räume",
           "rowCount": 12,
           "add": false,
           "delete": false,
@@ -65,7 +65,7 @@
     }
   ],
   "actions": [
-    { "type": "Label", "caption": "Statusvariablen: Zustand, Akku, Fehler, Reinigungszeit/-flaeche. Steuerung ueber die Variablen 'Aktion' und 'Raum reinigen'." }
+    { "type": "Label", "caption": "Statusvariablen: Zustand, Akku, Fehler, Reinigungszeit/-fläche. Steuerung über die Variablen 'Aktion' und 'Raum reinigen'." }
   ],
   "status": [
     { "code": 102, "icon": "active", "caption": "Aktiv" },
