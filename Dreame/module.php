@@ -46,6 +46,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeString('MapsRooms', '');   // [{map_id,floor,rooms:[{seg,name}]}]
         $this->RegisterAttributeInteger('SelectedMap', -1);
         $this->RegisterAttributeInteger('RoomCleaning', 0); // 1, sobald nach einer Raumauswahl aktiv gereinigt wurde
+        $this->RegisterAttributeInteger('CleanModeDefaulted', 0); // 1, sobald der Reinigungsmodus initial vorbelegt wurde
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -76,6 +77,23 @@ class DREAME extends IPSModule
         $this->RegisterVariableInteger('Aktion', 'Aktion', 'DREAME.Action', 80);
         $this->EnableAction('Aktion');
 
+        // ---- Steuerung: Reinigungsmodus (Dropdown) ----
+        // Wird vor dem Raumstart als Property (siid 4 / piid 23) gesetzt.
+        // Werte 0/1/2 gesichert; 3 (erst kehren, dann wischen) am Geraet zu verifizieren.
+        $this->RegisterProfileInteger('DREAME.CleanMode', 'Brush', '', '', 0, 0, 0);
+        $this->SetAssociations('DREAME.CleanMode', [
+            [-1, 'Geräteeinstellung belassen', '', -1],
+            [0, 'Nur kehren', '', 0x00A000],
+            [1, 'Nur wischen', '', 0x0080FF],
+            [2, 'Kehren & wischen (zusammen)', '', 0x00A000],
+            [3, 'Erst kehren, dann wischen', '', 0xA0A000]
+        ]);
+        $this->RegisterVariableInteger('CleanMode', 'Reinigungsmodus', 'DREAME.CleanMode', 85);
+        $this->EnableAction('CleanMode');
+
+        // Diagnose: aktueller Reinigungsmodus laut Geraet (zur Verifikation der Modus-Werte)
+        $this->RegisterVariableString('DeviceMode', 'Reinigungsmodus (Gerät)', '~TextBox', 86);
+
         // ---- Steuerung: Raum (Dropdown, dynamisch) ----
         $roomProfile = $this->RoomProfileName();
         $this->RegisterProfileInteger($roomProfile, 'Move', '', '', 0, 0, 0);
@@ -102,6 +120,12 @@ class DREAME extends IPSModule
         $areaId = @$this->GetIDForIdent('CleaningArea');
         if ($areaId && IPS_GetName($areaId) == 'Gereinigte Flaeche (m2)') {
             IPS_SetName($areaId, 'Gereinigte Fläche (m²)');
+        }
+
+        // Reinigungsmodus einmalig auf "belassen" (-1) vorbelegen -> keine Verhaltensaenderung
+        if ($this->ReadAttributeInteger('CleanModeDefaulted') == 0) {
+            $this->SetValueIntegerSafe('CleanMode', -1);
+            $this->WriteAttributeInteger('CleanModeDefaulted', 1);
         }
 
         $email = trim($this->ReadPropertyString('Email'));
@@ -167,6 +191,11 @@ class DREAME extends IPSModule
             // Auswahl wieder auf "—" zuruecksetzen
             $this->SetValueIntegerSafe('Aktion', 0);
             $this->BumpFastPoll();
+            return;
+        }
+        if ($Ident == 'CleanMode') {
+            // Nur die Auswahl merken; angewendet wird sie beim naechsten Raumstart.
+            $this->SetValueIntegerSafe('CleanMode', intval($Value));
             return;
         }
         if ($Ident == 'Raum') {
@@ -248,7 +277,20 @@ class DREAME extends IPSModule
 
     public function CleanAll()
     {
-        return $this->DoAction(2, 1, []);
+        if (!$this->TryLock()) return false;
+        try {
+            if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
+            if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
+            // Gewaehlten Reinigungsmodus vor dem Start setzen
+            $this->ApplyCleaningMode();
+            $r = $this->Action(2, 1, []);
+            if ($r === false) { $this->SetOnline(false, 'Aktion fehlgeschlagen (2/1).'); return false; }
+            $this->SetOnline(true, '');
+            $this->BumpFastPoll();
+            return true;
+        } finally {
+            $this->Unlock();
+        }
     }
 
     // mapId = Etagen-/Karten-ID, segmentId = Raum-ID
@@ -268,6 +310,9 @@ class DREAME extends IPSModule
                 $this->WriteAttributeInteger('SelectedMap', $mapId);
                 IPS_Sleep(4000);
             }
+
+            // Gewaehlten Reinigungsmodus setzen (Kehren / Wischen / zusammen / erst kehren dann wischen)
+            $this->ApplyCleaningMode();
 
             // Saugkraft/Wasser vom Geraet uebernehmen (Fallback 1/2)
             $p = $this->GetProperties([[4, 4], [4, 5]]);
@@ -303,7 +348,7 @@ class DREAME extends IPSModule
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return; }
 
-            $p = $this->GetProperties([[2, 1], [2, 2], [3, 1], [4, 2], [4, 3]]);
+            $p = $this->GetProperties([[2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23]]);
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
 
@@ -316,6 +361,7 @@ class DREAME extends IPSModule
             if (isset($p['3.1'])) $this->SetValueIntegerSafe('Battery', intval($p['3.1']));
             if (isset($p['4.2'])) $this->SetValueIntegerSafe('CleaningTime', intval($p['4.2']));
             if (isset($p['4.3'])) $this->SetValueFloatSafe('CleaningArea', floatval($p['4.3']));
+            if (isset($p['4.23'])) $this->SetValueStringSafe('DeviceMode', $this->CleanModeText(intval($p['4.23'])));
         } finally {
             $this->Unlock();
             $this->UpdatePollTimer(false);
@@ -439,6 +485,31 @@ class DREAME extends IPSModule
             }
         }
         return $out;
+    }
+
+    // Setzt eine oder mehrere Properties. $items = [[siid, piid, value], ...]. Rueckgabe true/false.
+    private function SetProperties($items)
+    {
+        $dev = $this->EnsureDevice(false);
+        if ($dev === false) return false;
+        $did = $dev['did'];
+        $params = [];
+        foreach ($items as $it) {
+            $params[] = ['did' => $did, 'siid' => $it[0], 'piid' => $it[1], 'value' => $it[2]];
+        }
+        $body = ['did' => $did, 'id' => 1, 'data' => ['did' => $did, 'id' => 1, 'method' => 'set_properties', 'params' => $params]];
+        list($code, $resp) = $this->ApiPost($this->CmdPath($dev), $body);
+        return $code == 200;
+    }
+
+    // Setzt den in der Variable "Reinigungsmodus" gewaehlten Modus am Geraet (siid 4 / piid 23).
+    // Bei -1 ("Geraeteeinstellung belassen") wird nichts geaendert.
+    private function ApplyCleaningMode()
+    {
+        $mode = GetValueInteger($this->GetIDForIdent('CleanMode'));
+        if ($mode < 0) return;
+        $this->SetProperties([[4, 23, $mode]]);
+        IPS_Sleep(500);
     }
 
     // Fuehrt eine MiOT-Action aus. Rueckgabe Antwort-Array oder false.
@@ -692,6 +763,16 @@ class DREAME extends IPSModule
             122 => 'Verlässt die Basis'
         ];
         return isset($s[$code]) ? ($s[$code] . ' (' . $code . ')') : ('Status ' . $code);
+    }
+
+    // Reinigungsmodus laut Geraet (siid 4 / piid 23). Werte 0/1/2 gesichert; 3 noch zu verifizieren.
+    private function CleanModeText($code)
+    {
+        $m = [
+            0 => 'Nur kehren', 1 => 'Nur wischen', 2 => 'Kehren & wischen (zusammen)',
+            3 => 'Erst kehren, dann wischen'
+        ];
+        return isset($m[$code]) ? ($m[$code] . ' (' . $code . ')') : ('Modus ' . $code);
     }
 
     private function ErrorText($code)
