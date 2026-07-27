@@ -78,8 +78,8 @@ class DREAME extends IPSModule
         $this->EnableAction('Aktion');
 
         // ---- Steuerung: Reinigungsmodus (Dropdown) ----
-        // Wird vor dem Raumstart als Property (siid 4 / piid 23) gesetzt.
-        // Werte 0/1/2 gesichert; 3 (erst kehren, dann wischen) am Geraet zu verifizieren.
+        // Wird vor dem Start ins Modusfeld (untere 2 Bits) der gepackten Property
+        // siid 4 / piid 23 geschrieben (Details siehe ApplyCleaningMode). Am r2532a verifiziert.
         $this->RegisterProfileInteger('DREAME.CleanMode', 'Brush', '', '', 0, 0, 0);
         $this->SetAssociations('DREAME.CleanMode', [
             [-1, 'Geräteeinstellung belassen', '', -1],
@@ -504,12 +504,28 @@ class DREAME extends IPSModule
 
     // Setzt den in der Variable "Reinigungsmodus" gewaehlten Modus am Geraet (siid 4 / piid 23).
     // Bei -1 ("Geraeteeinstellung belassen") wird nichts geaendert.
+    // Wichtig: 4/23 ist beim r2532a ein GEPACKTER Wert (Modus in den untersten 2 Bits,
+    // darueber Selbstreinigungs-Flaeche/Feuchtigkeit). Daher aktuellen Wert lesen und nur
+    // das Modusfeld ersetzen. Bit-Zuordnung (Geraet mit Moppanhebung):
+    //   0 = zusammen, 1 = nur wischen, 2 = nur kehren, 3 = erst kehren dann wischen.
     private function ApplyCleaningMode()
     {
         $mode = GetValueInteger($this->GetIDForIdent('CleanMode'));
-        if ($mode < 0) return;
-        $this->SetProperties([[4, 23, $mode]]);
-        IPS_Sleep(500);
+        if ($mode < 0) return; // Geraeteeinstellung belassen
+
+        // Logische Dropdown-Auswahl -> Modus-Bits
+        $map = [0 => 2, 1 => 1, 2 => 0, 3 => 3]; // 0 Kehren,1 Wischen,2 Zusammen,3 ErstKehrenDannWischen
+        if (!isset($map[$mode])) return;
+        $bits = $map[$mode];
+
+        $cur = $this->GetProperties([[4, 23]]);
+        if (!isset($cur['4.23'])) return;
+        $raw = intval($cur['4.23']);
+        $new = ($raw & ~3) | $bits;
+        if ($new !== $raw) {
+            $this->SetProperties([[4, 23, $new]]);
+            IPS_Sleep(500);
+        }
     }
 
     // Fuehrt eine MiOT-Action aus. Rueckgabe Antwort-Array oder false.
@@ -765,14 +781,16 @@ class DREAME extends IPSModule
         return isset($s[$code]) ? ($s[$code] . ' (' . $code . ')') : ('Status ' . $code);
     }
 
-    // Reinigungsmodus laut Geraet (siid 4 / piid 23). Werte 0/1/2 gesichert; 3 noch zu verifizieren.
-    private function CleanModeText($code)
+    // Reinigungsmodus laut Geraet (siid 4 / piid 23). Wert ist gepackt; Modus in den untersten 2 Bits.
+    private function CleanModeText($raw)
     {
+        $bits = $raw & 3;
         $m = [
-            0 => 'Nur kehren', 1 => 'Nur wischen', 2 => 'Kehren & wischen (zusammen)',
-            3 => 'Erst kehren, dann wischen'
+            0 => 'Kehren & wischen (zusammen)', 1 => 'Nur wischen',
+            2 => 'Nur kehren', 3 => 'Erst kehren, dann wischen'
         ];
-        return isset($m[$code]) ? ($m[$code] . ' (' . $code . ')') : ('Modus ' . $code);
+        $label = isset($m[$bits]) ? $m[$bits] : ('Bits ' . $bits);
+        return $label . ' (roh ' . $raw . ')';
     }
 
     private function ErrorText($code)
