@@ -3,9 +3,9 @@
   "author": "FACE GmbH / JLD",
   "name": "Symcon-Dreame",
   "url": "https://github.com/JLDFACE/Symcon-Dreame",
-  "version": "1.0",
-  "build": 1,
-  "date": 20260723,
+  "version": "1.1",
+  "build": 2,
+  "date": 20260805,
   "compatibility": {
     "version": "7.0"
   }

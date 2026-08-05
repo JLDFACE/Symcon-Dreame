@@ -28,20 +28,23 @@
       "type": "ExpansionPanel",
       "caption": "Karten & Räume",
       "items": [
-        { "type": "Label", "caption": "Liest Etagen und Räume aus der Karte ein und füllt das Dropdown 'Raum reinigen'. Nach Umbau/Neukartierung erneut einlesen." },
+        { "type": "Label", "caption": "Liest Etagen und Räume aus der Karte ein. Nach Umbau/Neukartierung erneut einlesen." },
         { "type": "Button", "caption": "Karten & Räume einlesen", "onClick": "DREAME_DiscoverMapsAndRooms($id);" },
+        { "type": "Label", "caption": "Nur die mit „Verwenden“ angehakten Räume erscheinen im Dropdown „Raum reinigen“ und erhalten einen Auswahl-Schalter. Dreame legt beim Kartieren gelegentlich Räume an, die es nicht gibt (Blick durch Fenster oder Glastüren) – diese hier abwählen und „Änderungen übernehmen“ drücken." },
         {
           "type": "List",
-          "name": "DiscoveredRooms",
-          "caption": "Erkannte Räume",
+          "name": "RoomFilter",
+          "caption": "Räume",
           "rowCount": 12,
           "add": false,
           "delete": false,
+          "loadValuesFromConfiguration": false,
           "columns": [
-            { "caption": "Etage", "name": "floor", "width": "120px" },
-            { "caption": "Karte", "name": "mapid", "width": "60px" },
-            { "caption": "Segment-ID", "name": "seg", "width": "90px" },
-            { "caption": "Raum", "name": "name", "width": "auto" }
+            { "caption": "Verwenden", "name": "use", "width": "100px", "edit": { "type": "CheckBox" } },
+            { "caption": "Etage", "name": "floor", "width": "120px", "save": true },
+            { "caption": "Karte", "name": "mapid", "width": "60px", "save": true },
+            { "caption": "Segment-ID", "name": "seg", "width": "90px", "save": true },
+            { "caption": "Raum", "name": "name", "width": "auto", "save": true }
           ]
         }
       ]
@@ -60,12 +63,22 @@
             { "type": "Button", "caption": "Orten (Piepen)", "onClick": "DREAME_Locate($id);" }
           ]
         },
+        {
+          "type": "RowLayout",
+          "items": [
+            { "type": "Button", "caption": "Ausgewählte Räume reinigen", "onClick": "DREAME_CleanSelectedRooms($id);" },
+            { "type": "Button", "caption": "Auswahl leeren", "onClick": "DREAME_ClearRoomSelection($id);" }
+          ]
+        },
         { "type": "Button", "caption": "Status jetzt abfragen", "onClick": "DREAME_UpdateStatus($id);" }
       ]
     }
   ],
   "actions": [
-    { "type": "Label", "caption": "Statusvariablen: Zustand, Akku, Fehler, Reinigungszeit/-fläche. Steuerung über die Variablen 'Aktion' und 'Raum reinigen'." }
+    { "type": "Label", "caption": "Statusvariablen: Zustand, Akku, Fehler, Reinigungszeit/-fläche. Steuerung über die Variablen „Aktion“ und „Raum reinigen“." },
+    { "type": "Label", "caption": "Mehrere Räume: die gewünschten Schalter „Auswahl <Raum>“ einschalten und in „Aktion“ den Punkt „Ausgewählte Räume reinigen“ wählen. Nach dem Durchgang wird die Auswahl automatisch geleert. Per Skript: DREAME_CleanRooms($id, <Karten-ID>, '5,6,7')." },
+    { "type": "Label", "caption": "Vorwahlen vor dem Start: Reinigungsmodus (nur kehren / nur wischen / zusammen / erst kehren dann wischen), Reinigungsroute (Standard / Intensiv / Tiefen / Schnell), Saugkraft, Wischfeuchte und Durchgänge. Jede Vorwahl auf „Geräteeinstellung belassen“ ändert am Gerät nichts." },
+    { "type": "Label", "caption": "Achtung: Ist am Gerät „Individuelle Raumeinstellungen“ aktiv (Diagnosevariable), benutzt der Roboter die je Raum in der App gespeicherten Werte und ignoriert Saugkraft, Wischfeuchte und Durchgänge aus diesem Modul." }
   ],
   "status": [
     { "code": 102, "icon": "active", "caption": "Aktiv" },

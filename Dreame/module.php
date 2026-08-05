@@ -13,12 +13,20 @@
  * - Karten & Raeume: werden dynamisch aus der Kartendatei (OSS) gelesen und dekodiert
  *   (JSON -> mapstr[] -> base64+zlib -> Trailer-JSON -> seg_inf). Raeume landen in einem
  *   instanzspezifischen Variablenprofil (Auswahl "Etage . Raum").
+ * - Raumfilter: die Liste "Raeume" im Konfigurationsformular (Property RoomFilter) entscheidet,
+ *   welche Segmente ueberhaupt angeboten werden. Dreame legt beim Kartieren gern Phantomraeume
+ *   an (Blick durch Fenster/Glastueren); die lassen sich hier abwaehlen.
+ * - Mehrere Raeume je Durchgang: pro relevantem Raum gibt es einen Schalter "Auswahl <Raum>";
+ *   die Aktion "Ausgewaehlte Raeume reinigen" schickt alle angehakten Raeume in EINEM
+ *   MiOT-Aufruf (CLEANING_PROPERTIES {"selects":[[seg,Durchgaenge,Saugkraft,Wasser,Reihenfolge],...]}).
  * - Polling: ein Timer (UpdateInterval) fuer den Status; kurzer Fast-Poll nach Aktionen.
  * - Stabilitaet: Semaphore-Lock, niemals Fatals; Online/LastError nur bei Aenderung.
  *
  * MiOT-Kennungen (dreame.vacuum.r2532a / 5. Gen):
  *   State 2/1, Error 2/2, Akku 3/1, Charging 3/2, Status 4/1, Reinigungszeit 4/2,
- *   Flaeche 4/3, Saugkraft 4/4, Wasser 4/5, Wassertank 4/6, Task 4/7, MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   Flaeche 4/3, Saugkraft 4/4, Wasser/Moppfeuchte 4/5, Wassertank 4/6, Task 4/7,
+ *   CLEANING_PROPERTIES 4/10, Reinigungsmodus 4/23 (gepackt), CUSTOMIZED_CLEANING 4/26,
+ *   AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a. "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
  *   Aktionen: Alles=2/1, Pause=2/2, ZurBasis=3/1, RaumStart=4/1, Stop=4/2, WarnungLoeschen=4/3, Orten=7/1, Kartenwechsel=6/2.
  */
 
@@ -39,6 +47,8 @@ class DREAME extends IPSModule
         $this->RegisterPropertyString('Region', 'eu');
         $this->RegisterPropertyInteger('UpdateInterval', 60);
         $this->RegisterPropertyInteger('FastAfterChange', 20);
+        // Raumfilter: [{use,mapid,seg,...}] - leer/unbekannt = Raum wird verwendet
+        $this->RegisterPropertyString('RoomFilter', '[]');
 
         // ---- Attribute (persistent) ----
         $this->RegisterAttributeString('Auth', '');       // Token-Cache {access,refresh,exp,uid,tenant}
@@ -47,6 +57,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeInteger('SelectedMap', -1);
         $this->RegisterAttributeInteger('RoomCleaning', 0); // 1, sobald nach einer Raumauswahl aktiv gereinigt wurde
         $this->RegisterAttributeInteger('CleanModeDefaulted', 0); // 1, sobald der Reinigungsmodus initial vorbelegt wurde
+        $this->RegisterAttributeInteger('RunSettingsDefaulted', 0); // 1, sobald Route/Saugkraft/Feuchte/Durchgaenge vorbelegt wurden
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -72,7 +83,9 @@ class DREAME extends IPSModule
             [2, 'Pause', '', -1],
             [3, 'Stopp', '', -1],
             [4, 'Zur Basis', '', -1],
-            [5, 'Orten (Piepen)', '', -1]
+            [5, 'Orten (Piepen)', '', -1],
+            [6, 'Ausgewählte Räume reinigen', '', 0x00A000],
+            [7, 'Auswahl leeren', '', -1]
         ]);
         $this->RegisterVariableInteger('Aktion', 'Aktion', 'DREAME.Action', 80);
         $this->EnableAction('Aktion');
@@ -91,10 +104,67 @@ class DREAME extends IPSModule
         $this->RegisterVariableInteger('CleanMode', 'Reinigungsmodus', 'DREAME.CleanMode', 85);
         $this->EnableAction('CleanMode');
 
-        // Diagnose: aktueller Reinigungsmodus laut Geraet (zur Verifikation der Modus-Werte)
-        $this->RegisterVariableString('DeviceMode', 'Reinigungsmodus (Gerät)', '~TextBox', 86);
+        // ---- Steuerung: Reinigungsroute / Intensitaet (Dropdown) ----
+        // Sitzt in der gepackten JSON-Property AUTO_SWITCH_SETTINGS (siid 4 / piid 50)
+        // unter dem Schluessel "CleanRoute". Wirkt vor allem beim Wischen: bei rein
+        // kehrenden Modi meldet das Geraet Intensiv/Tief wieder als Standard zurueck.
+        $this->RegisterProfileInteger('DREAME.CleanRoute', 'Move', '', '', 0, 0, 0);
+        $this->SetAssociations('DREAME.CleanRoute', [
+            [-1, 'Geräteeinstellung belassen', '', -1],
+            [1, 'Standardreinigung', '', -1],
+            [2, 'Intensivreinigung', '', -1],
+            [3, 'Tiefenreinigung', '', -1],
+            [4, 'Schnellreinigung', '', -1]
+        ]);
+        $this->RegisterVariableInteger('CleanRoute', 'Reinigungsroute', 'DREAME.CleanRoute', 86);
+        $this->EnableAction('CleanRoute');
+
+        // ---- Steuerung: Saugkraft (siid 4 / piid 4) ----
+        $this->RegisterProfileInteger('DREAME.Suction', 'Ventilation', '', '', 0, 0, 0);
+        $this->SetAssociations('DREAME.Suction', [
+            [-1, 'Geräteeinstellung belassen', '', -1],
+            [0, 'Leise', '', -1],
+            [1, 'Standard', '', -1],
+            [2, 'Stark', '', -1],
+            [3, 'Turbo', '', -1]
+        ]);
+        $this->RegisterVariableInteger('Suction', 'Saugkraft', 'DREAME.Suction', 87);
+        $this->EnableAction('Suction');
+
+        // ---- Steuerung: Wischfeuchte (siid 4 / piid 5) ----
+        // Bei Geraeten mit Waschstation (X50) ist das die Moppfeuchte, nicht die Wassermenge.
+        $this->RegisterProfileInteger('DREAME.Water', 'Drops', '', '', 0, 0, 0);
+        $this->SetAssociations('DREAME.Water', [
+            [-1, 'Geräteeinstellung belassen', '', -1],
+            [1, 'Leicht feucht', '', -1],
+            [2, 'Feucht', '', -1],
+            [3, 'Nass', '', -1]
+        ]);
+        $this->RegisterVariableInteger('Water', 'Wischfeuchte', 'DREAME.Water', 88);
+        $this->EnableAction('Water');
+
+        // ---- Steuerung: Durchgaenge je Raum (2. Feld je selects-Eintrag) ----
+        $this->RegisterProfileInteger('DREAME.Repeats', 'Repeat', '', '', 0, 0, 0);
+        $this->SetAssociations('DREAME.Repeats', [
+            [1, '1× (Standard)', '', -1],
+            [2, '2×', '', -1],
+            [3, '3×', '', -1]
+        ]);
+        $this->RegisterVariableInteger('Repeats', 'Durchgänge', 'DREAME.Repeats', 89);
+        $this->EnableAction('Repeats');
+
+        // ---- Diagnose: was das Geraet tatsaechlich gesetzt hat ----
+        $this->RegisterVariableString('DeviceMode', 'Reinigungsmodus (Gerät)', '~TextBox', 95);
+        $this->RegisterVariableString('DeviceRoute', 'Reinigungsroute (Gerät)', '~TextBox', 96);
+        // Ist diese Option am Geraet aktiv, benutzt der Roboter die je Raum in der App
+        // gespeicherten Werte und ignoriert Saugkraft/Feuchte/Durchgaenge aus diesem Modul.
+        $this->RegisterVariableBoolean('CustomRoomSettings', 'Individuelle Raumeinstellungen (Gerät)', '~Switch', 97);
+        IPS_SetIcon($this->GetIDForIdent('CustomRoomSettings'), 'Brush');
+        $this->DisableAction('CustomRoomSettings');
 
         // ---- Steuerung: Raum (Dropdown, dynamisch) ----
+        // Einzelraum: Auswahl startet sofort. Fuer mehrere Raeume je Durchgang siehe
+        // die Schalter "Auswahl <Raum>" (Position ab 100) + Aktion "Ausgewaehlte Raeume reinigen".
         $roomProfile = $this->RoomProfileName();
         $this->RegisterProfileInteger($roomProfile, 'Move', '', '', 0, 0, 0);
         $this->SetAssociations($roomProfile, [[0, '— Raum wählen —', '', -1]]);
@@ -113,8 +183,9 @@ class DREAME extends IPSModule
         $this->WriteAttributeString('Auth', '');
         $this->WriteAttributeString('Device', '');
 
-        // Raumprofil aus gespeicherten Karten wiederherstellen (falls vorhanden)
+        // Raumprofil + Auswahlschalter aus gespeicherten Karten/Filter wiederherstellen
         $this->RebuildRoomProfile();
+        $this->SyncRoomSwitches();
 
         // Alte ASCII-Variablennamen auf Umlaute migrieren (nur solange noch Standardname)
         $areaId = @$this->GetIDForIdent('CleaningArea');
@@ -126,6 +197,16 @@ class DREAME extends IPSModule
         if ($this->ReadAttributeInteger('CleanModeDefaulted') == 0) {
             $this->SetValueIntegerSafe('CleanMode', -1);
             $this->WriteAttributeInteger('CleanModeDefaulted', 1);
+        }
+
+        // Route/Saugkraft/Feuchte ebenfalls auf "belassen" vorbelegen. Wichtig, weil eine neue
+        // Integer-Variable mit 0 startet und 0 bei der Saugkraft "Leise" bedeuten wuerde.
+        if ($this->ReadAttributeInteger('RunSettingsDefaulted') == 0) {
+            $this->SetValueIntegerSafe('CleanRoute', -1);
+            $this->SetValueIntegerSafe('Suction', -1);
+            $this->SetValueIntegerSafe('Water', -1);
+            $this->SetValueIntegerSafe('Repeats', 1);
+            $this->WriteAttributeInteger('RunSettingsDefaulted', 1);
         }
 
         $email = trim($this->ReadPropertyString('Email'));
@@ -143,12 +224,12 @@ class DREAME extends IPSModule
     {
         $form = json_decode(file_get_contents(__DIR__ . '/form.json'), true);
 
-        // Platzhalter-Element "DiscoveredRooms" mit Werten fuellen
+        // Raumliste "RoomFilter" mit den erkannten Raeumen (inkl. aktuellem Filterzustand) fuellen
         $rows = $this->BuildRoomRows();
         foreach ($form['elements'] as &$el) {
             if (isset($el['items'])) {
                 foreach ($el['items'] as &$it) {
-                    if (isset($it['name']) && $it['name'] == 'DiscoveredRooms') {
+                    if (isset($it['name']) && $it['name'] == 'RoomFilter') {
                         $it['values'] = $rows;
                     }
                 }
@@ -157,24 +238,84 @@ class DREAME extends IPSModule
         return json_encode($form);
     }
 
-    // Baut die Zeilen fuer die Liste "Erkannte Raeume" aus den gespeicherten Karten.
+    // Baut die Zeilen fuer die Liste "Räume" im Formular.
     private function BuildRoomRows()
     {
         $rows = [];
-        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
-        if (is_array($maps)) {
-            foreach ($maps as $m) {
-                foreach ($m['rooms'] as $r) {
-                    $rows[] = [
-                        'floor' => $m['floor'],
-                        'mapid' => $m['map_id'],
-                        'seg'   => $r['seg'],
-                        'name'  => $r['name']
-                    ];
-                }
-            }
+        foreach ($this->RoomEntries() as $e) {
+            $rows[] = [
+                'use'   => $e['use'],
+                'floor' => $e['floor'],
+                'mapid' => $e['mapid'],
+                'seg'   => $e['seg'],
+                'name'  => $e['name']
+            ];
         }
         return $rows;
+    }
+
+    // Interne Raumliste aus den gespeicherten Karten: Code, Anzeigename und Filterzustand.
+    // Reihenfolge = Reihenfolge in der Kartendatei (identisch zur Liste im Formular).
+    private function RoomEntries()
+    {
+        $entries = [];
+        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
+        if (!is_array($maps)) return $entries;
+
+        $multi  = count($maps) > 1;
+        $filter = $this->ReadRoomFilter();
+        $i = 0;
+        foreach ($maps as $m) {
+            if (!isset($m['rooms']) || !is_array($m['rooms'])) continue;
+            $mapId = intval($m['map_id']);
+            $floor = strval($m['floor']);
+            foreach ($m['rooms'] as $r) {
+                $seg  = intval($r['seg']);
+                $code = ($mapId * 1000) + $seg;
+                $name = strval($r['name']);
+                $entries[] = [
+                    'code'  => $code,
+                    'mapid' => $mapId,
+                    'seg'   => $seg,
+                    'floor' => $floor,
+                    'name'  => $name,
+                    'label' => $multi ? ($floor . ' . ' . $name) : $name,
+                    'use'   => $this->IsRoomUsed($filter, $code, $i)
+                ];
+                $i++;
+            }
+        }
+        return $entries;
+    }
+
+    // Liest die Property "RoomFilter". Zuordnung primaer ueber mapid/seg; falls die
+    // gespeicherten Zeilen diese Spalten nicht enthalten, als Rueckfall ueber den Zeilenindex.
+    private function ReadRoomFilter()
+    {
+        $out  = ['byCode' => [], 'byIndex' => []];
+        $rows = json_decode($this->ReadPropertyString('RoomFilter'), true);
+        if (!is_array($rows)) return $out;
+
+        $i = 0;
+        foreach ($rows as $row) {
+            if (!is_array($row)) { $i++; continue; }
+            $use = isset($row['use']) ? (bool)$row['use'] : true;
+            $out['byIndex'][$i] = $use;
+            if (isset($row['mapid']) && isset($row['seg'])) {
+                $code = (intval($row['mapid']) * 1000) + intval($row['seg']);
+                if ($code > 0) $out['byCode'][$code] = $use;
+            }
+            $i++;
+        }
+        return $out;
+    }
+
+    // Unbekannte Raeume gelten als "verwenden" -> Verhalten ohne gepflegten Filter bleibt gleich.
+    private function IsRoomUsed($filter, $code, $index)
+    {
+        if (isset($filter['byCode'][$code])) return $filter['byCode'][$code];
+        if (count($filter['byCode']) == 0 && isset($filter['byIndex'][$index])) return $filter['byIndex'][$index];
+        return true;
     }
 
     public function RequestAction($Ident, $Value)
@@ -187,15 +328,17 @@ class DREAME extends IPSModule
                 case 3: $this->Stop(); break;
                 case 4: $this->Charge(); break;
                 case 5: $this->Locate(); break;
+                case 6: $this->CleanSelectedRooms(); break;
+                case 7: $this->ClearRoomSelection(); break;
             }
             // Auswahl wieder auf "—" zuruecksetzen
             $this->SetValueIntegerSafe('Aktion', 0);
             $this->BumpFastPoll();
             return;
         }
-        if ($Ident == 'CleanMode') {
-            // Nur die Auswahl merken; angewendet wird sie beim naechsten Raumstart.
-            $this->SetValueIntegerSafe('CleanMode', intval($Value));
+        // Vorwahlen: nur merken, angewendet werden sie beim naechsten Start
+        if (in_array($Ident, ['CleanMode', 'CleanRoute', 'Suction', 'Water', 'Repeats'], true)) {
+            $this->SetValueIntegerSafe($Ident, intval($Value));
             return;
         }
         if ($Ident == 'Raum') {
@@ -207,6 +350,11 @@ class DREAME extends IPSModule
                 $this->SetValueIntegerSafe('Raum', $code);
                 $this->BumpFastPoll();
             }
+            return;
+        }
+        // Auswahlschalter der Mehrfachauswahl: nur merken, gestartet wird per Aktion
+        if (strpos($Ident, 'RoomSel') === 0) {
+            $this->SetValueBooleanSafe($Ident, (bool)$Value);
             return;
         }
     }
@@ -255,8 +403,9 @@ class DREAME extends IPSModule
 
             $this->WriteAttributeString('MapsRooms', json_encode($maps));
             $this->RebuildRoomProfile();
-            // Liste "Erkannte Raeume" sofort im offenen Formular aktualisieren
-            $this->UpdateFormField('DiscoveredRooms', 'values', json_encode($this->BuildRoomRows()));
+            $this->SyncRoomSwitches();
+            // Liste "Raeume" sofort im offenen Formular aktualisieren
+            $this->UpdateFormField('RoomFilter', 'values', json_encode($this->BuildRoomRows()));
             $this->SetOnline(true, '');
 
             $cnt = 0;
@@ -269,6 +418,8 @@ class DREAME extends IPSModule
                 foreach ($m['rooms'] as $r) $names[] = $r['name'] . ' [' . $r['seg'] . ']';
                 echo implode(', ', $names) . "\n";
             }
+            echo "\nNeue Räume sind zunächst aktiv. Nicht existierende Räume (z. B. durch Fenster\n"
+                . "erkannte Phantomräume) in der Liste abwählen und \"Änderungen übernehmen\" drücken.";
             return true;
         } finally {
             $this->Unlock();
@@ -281,8 +432,8 @@ class DREAME extends IPSModule
         try {
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
-            // Gewaehlten Reinigungsmodus vor dem Start setzen
-            $this->ApplyCleaningMode();
+            // Vorwahlen (Modus, Saugkraft, Feuchte, Route) vor dem Start setzen
+            $this->ApplyRunSettings();
             $r = $this->Action(2, 1, []);
             if ($r === false) { $this->SetOnline(false, 'Aktion fehlgeschlagen (2/1).'); return false; }
             $this->SetOnline(true, '');
@@ -293,45 +444,119 @@ class DREAME extends IPSModule
         }
     }
 
-    // mapId = Etagen-/Karten-ID, segmentId = Raum-ID
+    // Einzelner Raum. mapId = Etagen-/Karten-ID, segmentId = Raum-ID
     public function CleanRoom($mapId, $segmentId)
     {
-        $mapId = intval($mapId);
-        $seg   = intval($segmentId);
+        return $this->CleanRooms($mapId, [$segmentId]);
+    }
+
+    // Mehrere Raeume in EINEM Durchgang.
+    // $MapID    = Etagen-/Karten-ID (0 = aktuell gewaehlte bzw. erste Karte)
+    // $Segments = Array oder Komma-Liste von Raum-IDs ("5,6,7"). Werte ab 1000 werden als
+    //             Profilcode (mapId*1000+seg) verstanden, damit die Codes des Dropdowns passen.
+    // Die Reihenfolge der Uebergabe ist die Abarbeitungsreihenfolge (5. Feld je selects-Eintrag).
+    public function CleanRooms($MapID, $Segments)
+    {
+        $mapId = intval($MapID);
+        $segs  = $this->ParseSegments($Segments);
+        if (count($segs) == 0) {
+            $this->SetLastError('Keine gültigen Raum-IDs übergeben.');
+            echo 'Keine gültigen Raum-IDs übergeben.';
+            return false;
+        }
+        if ($mapId <= 0) $mapId = $this->DeriveMapId($Segments);
+
         if (!$this->TryLock()) return false;
         try {
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
 
             // Bei mehreren Etagen: zuerst auf die Zielkarte umschalten
-            if ($this->ReadAttributeInteger('SelectedMap') != $mapId) {
+            if ($mapId > 0 && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
                 $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
                 $this->Action(6, 2, [['piid' => 4, 'value' => $sm]]);
                 $this->WriteAttributeInteger('SelectedMap', $mapId);
                 IPS_Sleep(4000);
             }
 
-            // Gewaehlten Reinigungsmodus setzen (Kehren / Wischen / zusammen / erst kehren dann wischen)
-            $this->ApplyCleaningMode();
+            // Vorwahlen (Modus, Saugkraft, Feuchte, Route) setzen
+            $this->ApplyRunSettings();
 
-            // Saugkraft/Wasser vom Geraet uebernehmen (Fallback 1/2)
-            $p = $this->GetProperties([[4, 4], [4, 5]]);
-            $fan   = isset($p['4.4']) ? intval($p['4.4']) : 1;
-            $water = isset($p['4.5']) ? intval($p['4.5']) : 2;
+            // Saugkraft/Feuchte: Vorwahl, sonst der aktuelle Wert vom Geraet (Fallback 1/2)
+            $fan   = $this->ChosenSuction();
+            $water = $this->ChosenWater();
+            if ($fan < 0 || $water <= 0) {
+                $p = $this->GetProperties([[4, 4], [4, 5]]);
+                if ($fan < 0)     $fan   = isset($p['4.4']) ? intval($p['4.4']) : 1;
+                if ($water <= 0)  $water = isset($p['4.5']) ? intval($p['4.5']) : 2;
+            }
+            $repeats = $this->ChosenRepeats();
 
-            $selects = json_encode(['selects' => [[$seg, 1, $fan, $water, 1]]]);
+            // [Segment, Durchgaenge, Saugkraft, Feuchte, Reihenfolge]
+            // Reihenfolge bleibt bewusst bei 1: Geraete mit "Individuelle Raumeinstellungen"
+            // (Property 4/26, u. a. der X50) brechen die Fahrt ab, wenn dort hochgezaehlt wird
+            // - so macht es auch die Referenz-Implementierung. Die Abfolge bestimmt dann der
+            // Roboter selbst (Reinigungsreihenfolge aus der App/Karte).
+            $list = [];
+            foreach ($segs as $seg) {
+                $list[] = [$seg, $repeats, $fan, $water, 1];
+            }
+            $selects = json_encode(['selects' => $list]);
             $in = [
                 ['piid' => 1, 'value' => 18],       // Status = SEGMENT_CLEANING
                 ['piid' => 10, 'value' => $selects]  // CLEANING_PROPERTIES
             ];
+            $this->SendDebug('CleanRooms', 'map ' . $mapId . ' -> ' . $selects, 0);
             $r = $this->Action(4, 1, $in);
             if ($r === false) { $this->SetOnline(false, 'Raum-Start fehlgeschlagen.'); return false; }
             $this->SetOnline(true, '');
+            // Start angefordert -> Auswahl wird zurueckgesetzt, sobald der Durchgang durch ist
+            $this->WriteAttributeInteger('RoomCleaning', 1);
             $this->BumpFastPoll();
             return true;
         } finally {
             $this->Unlock();
         }
+    }
+
+    // Startet alle angehakten Raeume ("Auswahl <Raum>") in einem Durchgang.
+    public function CleanSelectedRooms()
+    {
+        $codes = $this->GetSelectedRoomCodes();
+        if (count($codes) == 0) {
+            $this->SetLastError('Kein Raum ausgewählt.');
+            echo 'Es ist kein Raum ausgewählt.';
+            return false;
+        }
+
+        // Ein Durchgang kann nur eine Etage abdecken
+        $byMap = [];
+        foreach ($codes as $c) {
+            $byMap[intdiv($c, 1000)][] = $c % 1000;
+        }
+        if (count($byMap) > 1) {
+            $this->SetLastError('Auswahl umfasst mehrere Etagen.');
+            echo "Die Auswahl umfasst mehrere Etagen. Ein Durchgang kann nur Räume einer Etage abdecken.";
+            return false;
+        }
+
+        $mapId = 0;
+        $segs  = [];
+        foreach ($byMap as $m => $s) { $mapId = intval($m); $segs = $s; }
+        $this->SetLastError('');
+        return $this->CleanRooms($mapId, $segs);
+    }
+
+    // Setzt alle Auswahlschalter zurueck.
+    public function ClearRoomSelection()
+    {
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2) continue;
+            if (strpos($o['ObjectIdent'], 'RoomSel') !== 0) continue;
+            if (GetValueBoolean($cid) !== false) SetValueBoolean($cid, false);
+        }
+        return true;
     }
 
     public function Pause()  { return $this->DoAction(2, 2, []); }
@@ -348,7 +573,7 @@ class DREAME extends IPSModule
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return; }
 
-            $p = $this->GetProperties([[2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23]]);
+            $p = $this->GetProperties([[2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 50]]);
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
 
@@ -362,6 +587,11 @@ class DREAME extends IPSModule
             if (isset($p['4.2'])) $this->SetValueIntegerSafe('CleaningTime', intval($p['4.2']));
             if (isset($p['4.3'])) $this->SetValueFloatSafe('CleaningArea', floatval($p['4.3']));
             if (isset($p['4.23'])) $this->SetValueStringSafe('DeviceMode', $this->CleanModeText(intval($p['4.23'])));
+            if (isset($p['4.26'])) $this->SetValueBooleanSafe('CustomRoomSettings', intval($p['4.26']) == 1);
+            if (isset($p['4.50'])) {
+                $route = $this->ParseAutoSwitch($p['4.50'], 'CleanRoute');
+                $this->SetValueStringSafe('DeviceRoute', $route === null ? 'nicht unterstützt' : $this->CleanRouteText($route));
+            }
         } finally {
             $this->Unlock();
             $this->UpdatePollTimer(false);
@@ -508,6 +738,55 @@ class DREAME extends IPSModule
     // darueber Selbstreinigungs-Flaeche/Feuchtigkeit). Daher aktuellen Wert lesen und nur
     // das Modusfeld ersetzen. Bit-Zuordnung (Geraet mit Moppanhebung):
     //   0 = zusammen, 1 = nur wischen, 2 = nur kehren, 3 = erst kehren dann wischen.
+    // Wendet alle Vorwahlen vor einem Start an: Reinigungsmodus, Saugkraft, Wischfeuchte
+    // und Reinigungsroute. Jede Vorwahl auf "belassen" laesst die Geraeteeinstellung in Ruhe.
+    private function ApplyRunSettings()
+    {
+        $this->ApplyCleaningMode();
+
+        $items = [];
+        $fan = $this->ChosenSuction();
+        if ($fan >= 0) $items[] = [4, 4, $fan];
+        $water = $this->ChosenWater();
+        if ($water > 0) $items[] = [4, 5, $water];
+        if (count($items) > 0) {
+            $this->SetProperties($items);
+            IPS_Sleep(300);
+        }
+
+        // Route steckt als einzelnes k/v-Paar in der JSON-Property 4/50
+        $route = $this->ChosenRoute();
+        if ($route > 0) {
+            $this->SetProperties([[4, 50, json_encode(['k' => 'CleanRoute', 'v' => $route])]]);
+            IPS_Sleep(300);
+        }
+    }
+
+    // Vorwahlen lesen. Rueckgabe -1 bzw. 0 bedeutet "Geraeteeinstellung belassen".
+    private function ChosenSuction()
+    {
+        $v = GetValueInteger($this->GetIDForIdent('Suction'));
+        return ($v >= 0 && $v <= 3) ? $v : -1;
+    }
+
+    private function ChosenWater()
+    {
+        $v = GetValueInteger($this->GetIDForIdent('Water'));
+        return ($v >= 1 && $v <= 3) ? $v : 0;
+    }
+
+    private function ChosenRoute()
+    {
+        $v = GetValueInteger($this->GetIDForIdent('CleanRoute'));
+        return ($v >= 1 && $v <= 4) ? $v : 0;
+    }
+
+    private function ChosenRepeats()
+    {
+        $v = GetValueInteger($this->GetIDForIdent('Repeats'));
+        return ($v >= 1 && $v <= 3) ? $v : 1;
+    }
+
     private function ApplyCleaningMode()
     {
         $mode = GetValueInteger($this->GetIDForIdent('CleanMode'));
@@ -641,24 +920,122 @@ class DREAME extends IPSModule
         if (!IPS_VariableProfileExists($profile)) return;
 
         $assocs = [[0, '— Raum wählen —', '', -1]];
-        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
-        $multi = is_array($maps) && count($maps) > 1;
-        if (is_array($maps)) {
-            foreach ($maps as $m) {
-                foreach ($m['rooms'] as $r) {
-                    $code = ($m['map_id'] * 1000) + intval($r['seg']);
-                    $label = $multi ? ($m['floor'] . ' . ' . $r['name']) : $r['name'];
-                    $assocs[] = [$code, $label, '', -1];
-                }
-            }
+        $codes  = [];
+        foreach ($this->RoomEntries() as $e) {
+            if (!$e['use']) continue;               // abgewaehlter Raum (z. B. Phantomraum)
+            $assocs[] = [$e['code'], $e['label'], '', -1];
+            $codes[] = $e['code'];
         }
         $this->SetAssociations($profile, $assocs);
+
+        // Steht in "Raum reinigen" ein inzwischen abgewaehlter Raum, Auswahl leeren
+        $id = @$this->GetIDForIdent('Raum');
+        if ($id) {
+            $cur = GetValueInteger($id);
+            if ($cur != 0 && !in_array($cur, $codes, true)) $this->SetValueIntegerSafe('Raum', 0);
+        }
     }
 
-    // Setzt die Auswahl "Raum reinigen" nach Abschluss einer Raumreinigung auf 0 zurueck.
-    // Ablauf: Sobald der Roboter nach einer Raumauswahl aktiv reinigt (unterwegs), wird
-    // gemerkt, dass eine Reinigung laeuft. Kehrt er danach an die Basis zurueck bzw. ist
-    // fertig (Leerlauf/Laedt/Trocknen/geladen), wird die Auswahl geleert.
+    // Legt fuer jeden relevanten Raum einen Schalter "Auswahl <Raum>" an und entfernt
+    // Schalter von Raeumen, die es nicht mehr gibt bzw. die abgewaehlt wurden.
+    private function SyncRoomSwitches()
+    {
+        $keep = [];
+        $pos  = 100;
+        foreach ($this->RoomEntries() as $e) {
+            if (!$e['use']) continue;
+            $ident = 'RoomSel' . $e['code'];
+            $label = 'Auswahl ' . $e['label'];
+            $keep[] = $ident;
+
+            $existed = @$this->GetIDForIdent($ident);
+            $this->RegisterVariableBoolean($ident, $label, '~Switch', $pos);
+            $this->EnableAction($ident);
+            $vid = $this->GetIDForIdent($ident);
+            IPS_SetIcon($vid, 'Move');
+            // Umbenannte Raeume nachziehen, aber selbst vergebene Namen nicht ueberschreiben
+            if ($existed && IPS_GetName($vid) != $label && strpos(IPS_GetName($vid), 'Auswahl ') === 0) {
+                IPS_SetName($vid, $label);
+            }
+            $pos++;
+        }
+
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2) continue;
+            $ident = $o['ObjectIdent'];
+            if (strpos($ident, 'RoomSel') !== 0) continue;
+            if (in_array($ident, $keep, true)) continue;
+            $this->UnregisterVariable($ident);
+        }
+    }
+
+    // Angehakte Raeume als Profilcodes, in Anzeige-Reihenfolge (= Abarbeitungsreihenfolge).
+    private function GetSelectedRoomCodes()
+    {
+        $found = [];
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2) continue;
+            if (strpos($o['ObjectIdent'], 'RoomSel') !== 0) continue;
+            if (GetValueBoolean($cid) !== true) continue;
+            $code = intval(substr($o['ObjectIdent'], 7));
+            if ($code <= 0) continue;
+            $found[] = ['pos' => intval($o['ObjectPosition']), 'code' => $code];
+        }
+        usort($found, function ($a, $b) {
+            if ($a['pos'] == $b['pos']) return $a['code'] - $b['code'];
+            return $a['pos'] - $b['pos'];
+        });
+        $out = [];
+        foreach ($found as $f) $out[] = $f['code'];
+        return $out;
+    }
+
+    // Normalisiert die Segment-Uebergabe: Array oder "5,6,7" -> [5,6,7] (ohne Dubletten).
+    // Werte ab 1000 gelten als Profilcode (mapId*1000+seg) und werden auf das Segment reduziert.
+    private function ParseSegments($segments)
+    {
+        if (is_array($segments)) {
+            $list = $segments;
+        } else {
+            $list = explode(',', str_replace([';', ' ', "\t", "\n", "\r"], ',', strval($segments)));
+        }
+        $out = [];
+        foreach ($list as $v) {
+            $n = intval($v);
+            if ($n >= 1000) $n = $n % 1000;
+            if ($n <= 0) continue;
+            if (!in_array($n, $out, true)) $out[] = $n;
+        }
+        return $out;
+    }
+
+    // Karten-ID ableiten: aus einem uebergebenen Profilcode, sonst zuletzt gewaehlte bzw. erste Karte.
+    private function DeriveMapId($segments)
+    {
+        if (is_array($segments)) {
+            $list = $segments;
+        } else {
+            $list = explode(',', str_replace([';', ' ', "\t", "\n", "\r"], ',', strval($segments)));
+        }
+        foreach ($list as $v) {
+            $n = intval($v);
+            if ($n >= 1000) return intdiv($n, 1000);
+        }
+        $sel = $this->ReadAttributeInteger('SelectedMap');
+        if ($sel > 0) return $sel;
+
+        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
+        if (is_array($maps) && count($maps) > 0 && isset($maps[0]['map_id'])) return intval($maps[0]['map_id']);
+        return 0;
+    }
+
+    // Setzt "Raum reinigen" und die Auswahlschalter nach Abschluss einer Raumreinigung zurueck.
+    // Ablauf ueber das Attribut RoomCleaning: 1 = Start abgesetzt (wartet auf "unterwegs"),
+    // 2 = Reinigung laeuft. Erst aus Zustand 2 heraus darf die Auswahl geleert werden - so
+    // wird eine Vorauswahl nicht durch eine fremde Fahrt (z. B. "Alles reinigen") geloescht
+    // und ein Reset direkt nach dem Start (Roboter noch an der Basis) verhindert.
     private function HandleRoomAutoReset($state)
     {
         // Zustaende, in denen der Roboter unterwegs bzw. mitten in der Reinigung ist
@@ -666,22 +1043,19 @@ class DREAME extends IPSModule
         // Zustaende, die "an der Basis / fertig" bedeuten -> Auswahl darf geleert werden
         $done = [2, 6, 8, 13, 14, 22, 24];
 
-        $current = GetValueInteger($this->GetIDForIdent('Raum'));
+        $phase = $this->ReadAttributeInteger('RoomCleaning');
 
         if (in_array($state, $busy, true)) {
-            // Es wurde ein Raum gewaehlt und der Roboter arbeitet -> Reinigung laeuft
-            if ($current > 0 && $this->ReadAttributeInteger('RoomCleaning') != 1) {
-                $this->WriteAttributeInteger('RoomCleaning', 1);
-            }
+            if ($phase == 1) $this->WriteAttributeInteger('RoomCleaning', 2);
             return;
         }
 
-        if (in_array($state, $done, true)) {
+        if (in_array($state, $done, true) && $phase == 2) {
             // Reinigung war aktiv und ist nun beendet -> Auswahl zuruecksetzen
-            if ($this->ReadAttributeInteger('RoomCleaning') == 1) {
-                if ($current != 0) $this->SetValueIntegerSafe('Raum', 0);
-                $this->WriteAttributeInteger('RoomCleaning', 0);
-            }
+            $id = @$this->GetIDForIdent('Raum');
+            if ($id && GetValueInteger($id) != 0) $this->SetValueIntegerSafe('Raum', 0);
+            $this->ClearRoomSelection();
+            $this->WriteAttributeInteger('RoomCleaning', 0);
         }
     }
 
@@ -793,6 +1167,33 @@ class DREAME extends IPSModule
         return $label . ' (roh ' . $raw . ')';
     }
 
+    // Reinigungsroute laut Geraet (Schluessel "CleanRoute" in Property 4/50).
+    private function CleanRouteText($v)
+    {
+        $m = [
+            0 => 'nicht gesetzt', 1 => 'Standardreinigung', 2 => 'Intensivreinigung',
+            3 => 'Tiefenreinigung', 4 => 'Schnellreinigung'
+        ];
+        return isset($m[$v]) ? ($m[$v] . ' (' . $v . ')') : ('Wert ' . $v);
+    }
+
+    // Holt einen Wert aus der JSON-Property AUTO_SWITCH_SETTINGS (4/50). Das Geraet liefert
+    // entweder eine Liste von {"k":...,"v":...} oder ein einzelnes Paar. null = nicht enthalten.
+    private function ParseAutoSwitch($raw, $key)
+    {
+        $d = json_decode(strval($raw), true);
+        if (!is_array($d)) return null;
+        if (isset($d['k'])) {
+            return (strval($d['k']) == $key && isset($d['v'])) ? intval($d['v']) : null;
+        }
+        foreach ($d as $it) {
+            if (is_array($it) && isset($it['k']) && strval($it['k']) == $key && isset($it['v'])) {
+                return intval($it['v']);
+            }
+        }
+        return null;
+    }
+
     private function ErrorText($code)
     {
         if ($code == 0) return 'kein Fehler';
@@ -839,6 +1240,12 @@ class DREAME extends IPSModule
         if (GetValueString($id) !== strval($err)) {
             $this->SetValueStringSafe('LastError', strval($err));
         }
+    }
+
+    // Nur die Fehlertext-Variable schreiben, Online-Status unveraendert lassen
+    private function SetLastError($err)
+    {
+        $this->SetValueStringSafe('LastError', strval($err));
     }
 
     private function TryLock()
