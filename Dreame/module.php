@@ -1503,9 +1503,13 @@ class DREAME extends IPSModule
         // in der Referenz) - also ein Hinweis, keine Stoerung.
         $warn = [9, 10, 20, 47, 51, 56, 68, 70, 71, 72, 75, 82, 85, 107, 114, 117, 121, 122, 123, 129, 213, 214];
 
+        // Das Wort "Hinweis" stand vorne und hat in schmalen Anzeigefeldern die
+        // eigentliche Meldung verdrängt ("Im Fehlerfeld soll aber nicht erst hinweis
+        // stehen", 05.08.2026). Es steht deshalb hinten, hinter dem Code.
         $text = isset($e[$code]) ? $e[$code] : ('Unbekannter Code ' . $code);
-        if (in_array($code, $warn, true)) $text = 'Hinweis: ' . $text;
-        return $text . ' (' . $code . ')';
+        $text .= ' (' . $code . ')';
+        if (in_array($code, $warn, true)) $text .= ' · Hinweis';
+        return $text;
     }
 
     // =========================================================================
