@@ -43,6 +43,7 @@ DREAME_ClearRoomSelection($id);
 ## Hinweise
 
 - Erfordert einen gefüllten **Frischwassertank** für Wisch-/Raumreinigung (sonst Fehler 107).
+- Die Variable *Fehler* zeigt alle ~140 Codes im Klartext. Codes, die der Roboter selbst nur als quittierbare Warnung führt, sind mit **„Hinweis:"** gekennzeichnet — z. B. `Hinweis: Wischen beendet – Mopp abnehmen und reinigen (68)`. Das ist keine Störung.
 - Nach Umbau/Neukartierung erneut **„Karten & Räume einlesen"**. Neue Räume sind zunächst aktiv; Schalter abgewählter oder verschwundener Räume werden entfernt.
 - Ein Durchgang deckt nur **eine Etage** ab — eine Auswahl über mehrere Karten wird abgelehnt.
 - **Reihenfolge der Räume** bestimmt der Roboter (Reinigungsreihenfolge aus der App). Das Modul schickt im 5. Feld je Raum bewusst konstant `1`: Geräte mit *Individuelle Raumeinstellungen* (Property 4/26, u. a. der X50) brechen den Auftrag ab, wenn dort hochgezählt wird — so hält es auch die Referenz-Implementierung.
