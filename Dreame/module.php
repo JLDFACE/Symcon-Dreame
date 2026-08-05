@@ -171,6 +171,18 @@ class DREAME extends IPSModule
         $this->RegisterVariableInteger('Raum', 'Raum reinigen', $roomProfile, 90);
         $this->EnableAction('Raum');
 
+        // ---- Steuerung: Karte (Etage) ----
+        // Der Roboter arbeitet immer auf EINER Karte. Bisher war das nur ein Attribut
+        // (SelectedMap) und wurde stillschweigend beim Raumstart umgeschaltet. Als
+        // Variable kann man die Karte bewusst waehlen, und alles Raumbezogene richtet
+        // sich danach: das Dropdown "Raum reinigen" zeigt nur ihre Raeume, die
+        // Auswahlschalter der anderen Karten sind versteckt und nicht schaltbar.
+        $mapProfile = $this->MapProfileName();
+        $this->RegisterProfileInteger($mapProfile, 'Move', '', '', 0, 0, 0);
+        $this->SetAssociations($mapProfile, [[0, '— keine Karte —', '', -1]]);
+        $this->RegisterVariableInteger('Karte', 'Karte', $mapProfile, 91);
+        $this->EnableAction('Karte');
+
         // ---- Timer ----
         $this->RegisterTimer('Poll', 0, 'DREAME_UpdateStatus($_IPS["TARGET"]);');
     }
@@ -183,9 +195,10 @@ class DREAME extends IPSModule
         $this->WriteAttributeString('Auth', '');
         $this->WriteAttributeString('Device', '');
 
-        // Raumprofil + Auswahlschalter aus gespeicherten Karten/Filter wiederherstellen
-        $this->RebuildRoomProfile();
+        // Karten-/Raumprofil + Auswahlschalter aus gespeicherten Karten/Filter wiederherstellen
+        $this->RebuildMapProfile();
         $this->SyncRoomSwitches();
+        $this->ApplyMapSelection();   // enthaelt RebuildRoomProfile()
 
         // Alte ASCII-Variablennamen auf Umlaute migrieren (nur solange noch Standardname)
         $areaId = @$this->GetIDForIdent('CleaningArea');
@@ -352,8 +365,21 @@ class DREAME extends IPSModule
             }
             return;
         }
+        if ($Ident == 'Karte') {
+            $this->SetSelectedMap(intval($Value), true);
+            $this->BumpFastPoll();
+            return;
+        }
         // Auswahlschalter der Mehrfachauswahl: nur merken, gestartet wird per Aktion
         if (strpos($Ident, 'RoomSel') === 0) {
+            $code = intval(substr($Ident, 7));
+            if (count($this->MapList()) > 1 && intdiv($code, 1000) != $this->ActiveMap()) {
+                // Raum einer anderen Karte: nicht anwaehlbar. Sonst startet der Durchgang
+                // mit einem stillen Kartenwechsel - erst die Karte "Karte" umschalten.
+                $this->SetValueBooleanSafe($Ident, false);
+                $this->SetLastError('Raum gehört zu einer anderen Karte. Erst die Karte umschalten.');
+                return;
+            }
             $this->SetValueBooleanSafe($Ident, (bool)$Value);
             return;
         }
@@ -402,8 +428,9 @@ class DREAME extends IPSModule
             if ($maps === false || count($maps) == 0) { $this->SetOnline(false, 'Karte konnte nicht dekodiert werden.'); return false; }
 
             $this->WriteAttributeString('MapsRooms', json_encode($maps));
-            $this->RebuildRoomProfile();
+            $this->RebuildMapProfile();
             $this->SyncRoomSwitches();
+            $this->ApplyMapSelection();   // enthaelt RebuildRoomProfile()
             // Liste "Raeume" sofort im offenen Formular aktualisieren
             $this->UpdateFormField('RoomFilter', 'values', json_encode($this->BuildRoomRows()));
             $this->SetOnline(true, '');
@@ -476,6 +503,7 @@ class DREAME extends IPSModule
                 $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
                 $this->Action(6, 2, [['piid' => 4, 'value' => $sm]]);
                 $this->WriteAttributeInteger('SelectedMap', $mapId);
+                $this->ApplyMapSelection();   // Variable "Karte", Flags, Dropdown mitziehen
                 IPS_Sleep(4000);
             }
 
@@ -914,15 +942,126 @@ class DREAME extends IPSModule
         return 'DREAME.Rooms' . $this->InstanceID;
     }
 
+    private function MapProfileName()
+    {
+        return 'DREAME.Maps' . $this->InstanceID;
+    }
+
+    // Karten aus der gespeicherten Kartendatei: [map_id => Etagenname]
+    private function MapList()
+    {
+        $out  = [];
+        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
+        if (!is_array($maps)) return $out;
+        foreach ($maps as $m) {
+            if (!isset($m['map_id'])) continue;
+            $id = intval($m['map_id']);
+            $out[$id] = isset($m['floor']) ? strval($m['floor']) : ('Karte ' . $id);
+        }
+        return $out;
+    }
+
+    // Aktive Karte. -1 im Attribut heisst "noch nie gewaehlt" -> erste Karte.
+    private function ActiveMap()
+    {
+        $maps = $this->MapList();
+        if (count($maps) == 0) return -1;
+        $sel = $this->ReadAttributeInteger('SelectedMap');
+        if (isset($maps[$sel])) return $sel;
+        $keys = array_keys($maps);
+        return $keys[0];
+    }
+
+    private function RebuildMapProfile()
+    {
+        $profile = $this->MapProfileName();
+        if (!IPS_VariableProfileExists($profile)) return;
+        $assocs = [];
+        foreach ($this->MapList() as $id => $floor) $assocs[] = [$id, $floor, '', -1];
+        if (count($assocs) == 0) $assocs = [[0, '— keine Karte —', '', -1]];
+        $this->SetAssociations($profile, $assocs);
+    }
+
+    // Je Karte ein Boolean "Karte <Etage> aktiv". Existiert, damit eine Visu die
+    // Sichtbarkeit ihrer Raumtasten daran binden kann (IPSView: ItemVisibility).
+    private function SyncMapFlags()
+    {
+        $active = $this->ActiveMap();
+        $keep   = [];
+        $pos    = 92;
+        foreach ($this->MapList() as $id => $floor) {
+            $ident  = 'MapActive' . $id;
+            $keep[] = $ident;
+            $this->RegisterVariableBoolean($ident, 'Karte ' . $floor . ' aktiv', '~Switch', $pos++);
+            $this->DisableAction($ident);
+            $this->SetValueBooleanSafe($ident, $id === $active);
+        }
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2 || strpos($o['ObjectIdent'], 'MapActive') !== 0) continue;
+            if (!in_array($o['ObjectIdent'], $keep, true)) $this->UnregisterVariable($o['ObjectIdent']);
+        }
+    }
+
+    // Karte waehlen. $switchDevice = false, wenn das Geraet schon umgeschaltet ist.
+    private function SetSelectedMap($mapId, $switchDevice)
+    {
+        $maps = $this->MapList();
+        if (count($maps) == 0) { $this->SetLastError('Es sind keine Karten eingelesen.'); return false; }
+        if (!isset($maps[$mapId])) { $this->SetLastError('Unbekannte Karte ' . $mapId . '.'); return false; }
+
+        if ($switchDevice && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
+            if (!$this->Login(false) || $this->EnsureDevice(false) === false) {
+                $this->SetOnline(false, 'Kartenwechsel: keine Verbindung.');
+                return false;
+            }
+            $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
+            if ($this->Action(6, 2, [['piid' => 4, 'value' => $sm]]) === false) {
+                $this->SetOnline(false, 'Kartenwechsel fehlgeschlagen.');
+                return false;
+            }
+            IPS_Sleep(4000);
+        }
+        $this->WriteAttributeInteger('SelectedMap', $mapId);
+        $this->ApplyMapSelection();
+        return true;
+    }
+
+    // Zieht alles Raumbezogene auf die aktive Karte: Variable, Flags, Dropdown und
+    // die Auswahlschalter (fremde Karten werden versteckt und abgewaehlt).
+    private function ApplyMapSelection()
+    {
+        $active = $this->ActiveMap();
+        if (@$this->GetIDForIdent('Karte')) $this->SetValueIntegerSafe('Karte', $active);
+        $this->SyncMapFlags();
+        $this->RebuildRoomProfile();
+
+        $mehrere = count($this->MapList()) > 1;
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2 || strpos($o['ObjectIdent'], 'RoomSel') !== 0) continue;
+            $code  = intval(substr($o['ObjectIdent'], 7));
+            $fremd = $mehrere && intdiv($code, 1000) != $active;
+            if ($o['ObjectIsHidden'] != $fremd) IPS_SetHidden($cid, $fremd);
+            if ($fremd && GetValueBoolean($cid) !== false) SetValueBoolean($cid, false);
+        }
+    }
+
     private function RebuildRoomProfile()
     {
         $profile = $this->RoomProfileName();
         if (!IPS_VariableProfileExists($profile)) return;
 
+        // Nur die Raeume der AKTIVEN Karte. Ein Durchgang kann ohnehin nur eine Etage
+        // abdecken, und ein Raum der anderen Karte wuerde das Geraet still umschalten.
+        $active  = $this->ActiveMap();
+        $mehrere = count($this->MapList()) > 1;
+
         $assocs = [[0, '— Raum wählen —', '', -1]];
         $codes  = [];
         foreach ($this->RoomEntries() as $e) {
             if (!$e['use']) continue;               // abgewaehlter Raum (z. B. Phantomraum)
+            if ($mehrere && $e['mapid'] != $active) continue;
             $assocs[] = [$e['code'], $e['label'], '', -1];
             $codes[] = $e['code'];
         }

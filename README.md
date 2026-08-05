@@ -9,7 +9,8 @@ IP-Symcon-Modul zur Steuerung von **Dreame-Saugrobotern** (getestet mit **X50 Ul
 - **Login** in die dreamehome-Cloud (OAuth password-grant), Token wird gecacht/erneuert.
 - **Status-Variablen:** Zustand (Klartext), Akku, Fehler (Klartext), Reinigungszeit, gereinigte Fläche.
 - **Aktionen** (Variable *Aktion*): Alles reinigen · Pause · Stopp · Zur Basis · Orten · Ausgewählte Räume reinigen · Auswahl leeren.
-- **Raumreinigung** (Variable *Raum reinigen*): Dropdown mit allen relevanten Räumen aller Etagen — Auswahl startet sofort.
+- **Kartenwahl** (Variable *Karte*): bei mehreren Etagen die aktive Karte wählen — das Gerät schaltet um (Action 6/2), und **alles Raumbezogene richtet sich danach**: *Raum reinigen* zeigt nur die Räume dieser Karte, die Schalter *Auswahl &lt;Raum&gt;* der anderen Karten sind versteckt, abgewählt und nicht schaltbar. Zusätzlich gibt es je Karte ein Boolean *Karte &lt;Etage&gt; aktiv* — damit kann eine Visualisierung ihre Raumtasten ein-/ausblenden (in IPSView: *Variable Sichtbarkeit*).
+- **Raumreinigung** (Variable *Raum reinigen*): Dropdown mit den Räumen der aktiven Karte — Auswahl startet sofort.
 - **Mehrere Räume in einem Durchgang**: pro Raum ein Schalter *Auswahl &lt;Raum&gt;*. Die gewünschten Räume einschalten, dann in *Aktion* → *Ausgewählte Räume reinigen*. Alle Räume gehen in **einem** Befehl an den Roboter; danach wird die Auswahl automatisch geleert.
 - **Vorwahlen vor dem Start** — jeweils mit Option *Geräteeinstellung belassen*:
   - *Reinigungsmodus*: nur kehren · nur wischen · zusammen · erst kehren, dann wischen (Property 4/23, gepackt)
