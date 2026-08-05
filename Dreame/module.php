@@ -451,10 +451,10 @@ class DREAME extends IPSModule
     }
 
     // Mehrere Raeume in EINEM Durchgang.
-    // $MapID    = Etagen-/Karten-ID (0 = aktuell gewaehlte bzw. erste Karte)
+    // $MapID    = Etagen-/Karten-ID. ACHTUNG: 0 ist eine gueltige Karte (die erste Etage
+    //             heisst hier map_id 0). Nur ein negativer Wert bedeutet "selbst ableiten".
     // $Segments = Array oder Komma-Liste von Raum-IDs ("5,6,7"). Werte ab 1000 werden als
     //             Profilcode (mapId*1000+seg) verstanden, damit die Codes des Dropdowns passen.
-    // Die Reihenfolge der Uebergabe ist die Abarbeitungsreihenfolge (5. Feld je selects-Eintrag).
     public function CleanRooms($MapID, $Segments)
     {
         $mapId = intval($MapID);
@@ -464,7 +464,7 @@ class DREAME extends IPSModule
             echo 'Keine gültigen Raum-IDs übergeben.';
             return false;
         }
-        if ($mapId <= 0) $mapId = $this->DeriveMapId($Segments);
+        if ($mapId < 0) $mapId = $this->DeriveMapId($Segments, $segs);
 
         if (!$this->TryLock()) return false;
         try {
@@ -472,7 +472,7 @@ class DREAME extends IPSModule
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
 
             // Bei mehreren Etagen: zuerst auf die Zielkarte umschalten
-            if ($mapId > 0 && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
+            if ($mapId >= 0 && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
                 $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
                 $this->Action(6, 2, [['piid' => 4, 'value' => $sm]]);
                 $this->WriteAttributeInteger('SelectedMap', $mapId);
@@ -540,7 +540,7 @@ class DREAME extends IPSModule
             return false;
         }
 
-        $mapId = 0;
+        $mapId = -1;
         $segs  = [];
         foreach ($byMap as $m => $s) { $mapId = intval($m); $segs = $s; }
         $this->SetLastError('');
@@ -1011,9 +1011,11 @@ class DREAME extends IPSModule
         return $out;
     }
 
-    // Karten-ID ableiten: aus einem uebergebenen Profilcode, sonst zuletzt gewaehlte bzw. erste Karte.
-    private function DeriveMapId($segments)
+    // Karten-ID ableiten, wenn der Aufrufer keine angegeben hat. Rueckgabe -1 = unbekannt
+    // (dann wird nicht umgeschaltet). Karten-ID 0 ist ein gueltiges Ergebnis.
+    private function DeriveMapId($segments, $parsed)
     {
+        // 1. Profilcode (mapId*1000+seg) ist eindeutig
         if (is_array($segments)) {
             $list = $segments;
         } else {
@@ -1023,12 +1025,25 @@ class DREAME extends IPSModule
             $n = intval($v);
             if ($n >= 1000) return intdiv($n, 1000);
         }
+
+        // 2. Segment in den eingelesenen Karten suchen - nur wenn es dort genau einmal vorkommt
+        //    (Segment-Nummern wiederholen sich zwischen den Etagen)
+        $entries = $this->RoomEntries();
+        foreach ($parsed as $seg) {
+            $hits = [];
+            foreach ($entries as $e) {
+                if ($e['seg'] == $seg && !in_array($e['mapid'], $hits, true)) $hits[] = $e['mapid'];
+            }
+            if (count($hits) == 1) return $hits[0];
+        }
+
+        // 3. zuletzt umgeschaltete Karte, sonst die erste eingelesene
         $sel = $this->ReadAttributeInteger('SelectedMap');
-        if ($sel > 0) return $sel;
+        if ($sel >= 0) return $sel;
 
         $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
         if (is_array($maps) && count($maps) > 0 && isset($maps[0]['map_id'])) return intval($maps[0]['map_id']);
-        return 0;
+        return -1;
     }
 
     // Setzt "Raum reinigen" und die Auswahlschalter nach Abschluss einer Raumreinigung zurueck.
