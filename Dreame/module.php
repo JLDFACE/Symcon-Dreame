@@ -70,12 +70,12 @@ class DREAME extends IPSModule
         $this->RegisterVariableBoolean('Online', 'Online', '~Switch', 10);
         IPS_SetIcon($this->GetIDForIdent('Online'), 'Network');
         $this->DisableAction('Online');
-        $this->RegisterVariableString('LastError', 'Letzter Fehler', '~TextBox', 20);
+        $this->RegisterVariableString('LastError', 'Letzter Fehler', '', 20);
 
         // ---- Status ----
-        $this->RegisterVariableString('Zustand', 'Zustand', '~TextBox', 30);
+        $this->RegisterVariableString('Zustand', 'Zustand', '', 30);
         $this->RegisterVariableInteger('Battery', 'Akku', '~Battery.100', 40);
-        $this->RegisterVariableString('Fehler', 'Fehler', '~TextBox', 50);
+        $this->RegisterVariableString('Fehler', 'Fehler', '', 50);
         $this->RegisterVariableInteger('CleaningTime', 'Reinigungszeit (min)', '', 60);
         $this->RegisterVariableFloat('CleaningArea', 'Gereinigte Fläche (m²)', '', 70);
 
@@ -158,8 +158,8 @@ class DREAME extends IPSModule
         $this->EnableAction('Repeats');
 
         // ---- Diagnose: was das Geraet tatsaechlich gesetzt hat ----
-        $this->RegisterVariableString('DeviceMode', 'Reinigungsmodus (Gerät)', '~TextBox', 95);
-        $this->RegisterVariableString('DeviceRoute', 'Reinigungsroute (Gerät)', '~TextBox', 96);
+        $this->RegisterVariableString('DeviceMode', 'Reinigungsmodus (Gerät)', '', 95);
+        $this->RegisterVariableString('DeviceRoute', 'Reinigungsroute (Gerät)', '', 96);
         // Ist diese Option am Geraet aktiv, benutzt der Roboter die je Raum in der App
         // gespeicherten Werte und ignoriert Saugkraft/Feuchte/Durchgaenge aus diesem Modul.
         $this->RegisterVariableBoolean('CustomRoomSettings', 'Individuelle Raumeinstellungen (Gerät)', '~Switch', 97);
@@ -169,7 +169,7 @@ class DREAME extends IPSModule
         // ---- Reinigungshistorie ----
         // Je Eintrag zwei Zeilen, damit eine Visu sie direkt an Labels binden kann.
         // Die Daten kommen aus den Geraete-Events der Cloud (siehe FetchHistory).
-        $this->RegisterVariableString('HistUpdated', 'Historie aktualisiert', '~TextBox', 199);
+        $this->RegisterVariableString('HistUpdated', 'Historie aktualisiert', '', 199);
         $this->SyncHistoryVariables();
 
         // ---- Steuerung: Raum (Dropdown, dynamisch) ----
@@ -737,8 +737,8 @@ class DREAME extends IPSModule
         $keep = [];
         $pos  = 200;
         for ($i = 1; $i <= $count; $i++) {
-            $this->RegisterVariableString('HistLine' . $i, 'Reinigung ' . $i, '~TextBox', $pos++);
-            $this->RegisterVariableString('HistInfo' . $i, 'Reinigung ' . $i . ' Details', '~TextBox', $pos++);
+            $this->RegisterVariableString('HistLine' . $i, 'Reinigung ' . $i, '', $pos++);
+            $this->RegisterVariableString('HistInfo' . $i, 'Reinigung ' . $i . ' Details', '', $pos++);
             $keep[] = 'HistLine' . $i;
             $keep[] = 'HistInfo' . $i;
         }
