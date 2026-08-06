@@ -49,6 +49,8 @@ class DREAME extends IPSModule
         $this->RegisterPropertyInteger('FastAfterChange', 20);
         // Raumfilter: [{use,mapid,seg,...}] - leer/unbekannt = Raum wird verwendet
         $this->RegisterPropertyString('RoomFilter', '[]');
+        // Anzahl der Eintraege in der Reinigungshistorie
+        $this->RegisterPropertyInteger('HistoryCount', 10);
 
         // ---- Attribute (persistent) ----
         $this->RegisterAttributeString('Auth', '');       // Token-Cache {access,refresh,exp,uid,tenant}
@@ -59,6 +61,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeInteger('RoomCleaning', 0); // 1, sobald nach einer Raumauswahl aktiv gereinigt wurde
         $this->RegisterAttributeInteger('CleanModeDefaulted', 0); // 1, sobald der Reinigungsmodus initial vorbelegt wurde
         $this->RegisterAttributeInteger('RunSettingsDefaulted', 0); // 1, sobald Route/Saugkraft/Feuchte/Durchgaenge vorbelegt wurden
+        $this->RegisterAttributeInteger('WasBusy', 0);              // 1, solange der letzte Poll einen laufenden Auftrag sah
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -163,6 +166,12 @@ class DREAME extends IPSModule
         IPS_SetIcon($this->GetIDForIdent('CustomRoomSettings'), 'Brush');
         $this->DisableAction('CustomRoomSettings');
 
+        // ---- Reinigungshistorie ----
+        // Je Eintrag zwei Zeilen, damit eine Visu sie direkt an Labels binden kann.
+        // Die Daten kommen aus den Geraete-Events der Cloud (siehe FetchHistory).
+        $this->RegisterVariableString('HistUpdated', 'Historie aktualisiert', '~TextBox', 199);
+        $this->SyncHistoryVariables();
+
         // ---- Steuerung: Raum (Dropdown, dynamisch) ----
         // Einzelraum: Auswahl startet sofort. Fuer mehrere Raeume je Durchgang siehe
         // die Schalter "Auswahl <Raum>" (Position ab 100) + Aktion "Ausgewaehlte Raeume reinigen".
@@ -195,6 +204,9 @@ class DREAME extends IPSModule
         // Token-/Geraete-Cache verwerfen, damit Konfigaenderungen frisch greifen
         $this->WriteAttributeString('Auth', '');
         $this->WriteAttributeString('Device', '');
+
+        // Historie-Variablen an die eingestellte Anzahl anpassen
+        $this->SyncHistoryVariables();
 
         // Karten-/Raumprofil + Auswahlschalter aus gespeicherten Karten/Filter wiederherstellen
         $this->RebuildMapProfile();
@@ -590,6 +602,186 @@ class DREAME extends IPSModule
         return true;
     }
 
+    // =========================================================================
+    // Reinigungshistorie
+    // =========================================================================
+
+    // Holt die letzten Reinigungen aus der Cloud und schreibt sie in die Variablen.
+    public function UpdateHistory()
+    {
+        if (!$this->TryLock()) return false;
+        try {
+            if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
+            if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
+            $n = $this->FetchHistory();
+            if ($n === false) {
+                $this->SetLastError('Historie konnte nicht gelesen werden.');
+                echo 'Historie konnte nicht gelesen werden.';
+                return false;
+            }
+            echo 'OK - ' . $n . ' Einträge eingelesen.';
+            return true;
+        } finally {
+            $this->Unlock();
+        }
+    }
+
+    // Eigentlicher Abruf OHNE Lock - Aufrufer muss den Lock halten.
+    //
+    // Die Cloud fuehrt kein fertiges Reinigungsprotokoll, sondern die Ereignisse der
+    // Status-Property (siid 4). Jeder Eintrag traegt unter "history" ein JSON-Array
+    // [{piid,value}, ...] mit den Werten zum Abschluss des Auftrags:
+    //   1 = Status (2 Komplett-, 18 Raum-, 4 Teilreinigung), 2 = Dauer (min), 3 = Flaeche (m²),
+    //   8 = Startzeit (Unix), 13 = Ergebnis, 10 = CLEANING_PROPERTIES (JSON, u. a. Abbruchgrund).
+    // Rueckgabe: Anzahl Eintraege oder false.
+    private function FetchHistory()
+    {
+        $dev  = $this->EnsureDevice(false);
+        $auth = json_decode($this->ReadAttributeString('Auth'), true);
+        if ($dev === false || !isset($auth['uid'])) return false;
+
+        $count = intval($this->ReadPropertyInteger('HistoryCount'));
+        if ($count < 1) $count = 10;
+        if ($count > 30) $count = 30;
+
+        $body = [
+            'uid'    => strval($auth['uid']),
+            'did'    => strval($dev['did']),
+            'from'   => 1687019188,
+            'limit'  => $count,
+            'siid'   => 4,
+            'eiid'   => 1,
+            'region' => $this->Region(),
+            'type'   => 3
+        ];
+        list($code, $resp) = $this->ApiPost('dreame-user-iot/iotstatus/history', $body);
+        if ($code != 200) return false;
+        $d = json_decode($resp, true);
+        if (!isset($d['data']['list']) || !is_array($d['data']['list'])) return false;
+
+        $runs = [];
+        foreach ($d['data']['list'] as $item) {
+            $raw = isset($item['history']) ? $item['history'] : (isset($item['value']) ? $item['value'] : '');
+            $run = $this->ParseHistoryEntry($raw);
+            if ($run === false) continue;
+            // Das Geraet meldet denselben Auftrag gelegentlich mehrfach
+            if (count($runs) > 0 && $runs[count($runs) - 1]['start'] == $run['start']) continue;
+            $runs[] = $run;
+        }
+
+        $this->SyncHistoryVariables();
+        for ($i = 1; $i <= $count; $i++) {
+            $line = '';
+            $info = '';
+            if (isset($runs[$i - 1])) {
+                $line = $runs[$i - 1]['line'];
+                $info = $runs[$i - 1]['info'];
+            }
+            $this->SetValueStringSafe('HistLine' . $i, $line);
+            $this->SetValueStringSafe('HistInfo' . $i, $info);
+        }
+        $this->SetValueStringSafe('HistUpdated', date('d.m.Y H:i', time()));
+        $this->SetOnline(true, '');
+        return count($runs);
+    }
+
+    // Wertet einen Rohdatensatz aus. Rueckgabe [start, line, info] oder false.
+    private function ParseHistoryEntry($raw)
+    {
+        $items = json_decode(strval($raw), true);
+        if (!is_array($items)) return false;
+
+        $v = [];
+        foreach ($items as $it) {
+            if (isset($it['piid'])) $v[intval($it['piid'])] = isset($it['value']) ? $it['value'] : (isset($it['val']) ? $it['val'] : null);
+        }
+        if (!isset($v[8])) return false;   // ohne Startzeit kein sinnvoller Eintrag
+
+        $start = intval($v[8]);
+        $min   = isset($v[2]) ? intval($v[2]) : 0;
+        $area  = isset($v[3]) ? intval($v[3]) : 0;
+
+        $line = $this->WeekdayShort($start) . ' ' . date('d.m.', $start) . '  ' . date('H:i', $start)
+            . '  ·  ' . $this->DurationText($min) . '  ·  ' . $area . ' m²';
+
+        // Art des Auftrags aus dem Status
+        $arten = [2 => 'Komplettreinigung', 18 => 'Raumreinigung', 4 => 'Teilreinigung', 27 => 'Punktreinigung'];
+        $art   = isset($v[1]) && isset($arten[intval($v[1])]) ? $arten[intval($v[1])] : 'Reinigung';
+
+        // Ergebnis
+        $erg = ['0' => 'unterbrochen', '1' => 'abgeschlossen', '2' => 'manuell beendet', '3' => 'fehlgeschlagen'];
+        $ergText = isset($v[13]) && isset($erg[strval(intval($v[13]))]) ? $erg[strval(intval($v[13]))] : 'unbekannt';
+
+        $info = $art . ' · ' . $ergText;
+
+        // Abbruchgrund, falls das Geraet einen mitgeschickt hat
+        if (isset($v[10])) {
+            $props = json_decode(strval($v[10]), true);
+            if (is_array($props) && isset($props['abnormal_end'])) {
+                $reason = json_decode(strval($props['abnormal_end']), true);
+                if (is_array($reason) && isset($reason[0]) && intval($reason[0]) != 0) {
+                    $info .= ' (' . $this->InterruptText(intval($reason[0])) . ')';
+                }
+            }
+        }
+        return ['start' => $start, 'line' => $line, 'info' => $info];
+    }
+
+    // Legt die Variablenpaare fuer die Historie an bzw. entfernt ueberzaehlige.
+    private function SyncHistoryVariables()
+    {
+        $count = intval($this->ReadPropertyInteger('HistoryCount'));
+        if ($count < 1) $count = 10;
+        if ($count > 30) $count = 30;
+
+        $keep = [];
+        $pos  = 200;
+        for ($i = 1; $i <= $count; $i++) {
+            $this->RegisterVariableString('HistLine' . $i, 'Reinigung ' . $i, '~TextBox', $pos++);
+            $this->RegisterVariableString('HistInfo' . $i, 'Reinigung ' . $i . ' Details', '~TextBox', $pos++);
+            $keep[] = 'HistLine' . $i;
+            $keep[] = 'HistInfo' . $i;
+        }
+        foreach (IPS_GetChildrenIDs($this->InstanceID) as $cid) {
+            $o = IPS_GetObject($cid);
+            if ($o['ObjectType'] != 2) continue;
+            $ident = $o['ObjectIdent'];
+            if (strpos($ident, 'HistLine') !== 0 && strpos($ident, 'HistInfo') !== 0) continue;
+            if (in_array($ident, $keep, true)) continue;
+            $this->UnregisterVariable($ident);
+        }
+    }
+
+    private function WeekdayShort($ts)
+    {
+        $d = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+        return $d[intval(date('w', $ts))];
+    }
+
+    private function DurationText($minutes)
+    {
+        $m = intval($minutes);
+        if ($m < 60) return $m . ' min';
+        return intdiv($m, 60) . ':' . str_pad(strval($m % 60), 2, '0', STR_PAD_LEFT) . ' h';
+    }
+
+    // Abbruchgruende aus TaskInterruptReason der Referenz-Implementierung.
+    private function InterruptText($code)
+    {
+        $r = [
+            11 => 'Roboter angehoben', 12 => 'Roboter umgekippt', 13 => 'Fallsensor',
+            14 => 'Mopp entfernt', 15 => 'Mopp abgefallen', 16 => 'Mopp verklemmt',
+            17 => 'Mopp an Möbel abgestreift', 18 => 'Mopp an Hindernis abgestreift',
+            19 => 'Mopp unerwartet entfernt', 20 => 'Mopp beim Überfahren verloren',
+            21 => 'Bürste durch Hindernis blockiert', 22 => 'Bürste im Teppich verfangen',
+            23 => 'Bürste durch Gegenstand blockiert', 24 => 'Laserdistanzsensor',
+            25 => 'auf Schwelle festgefahren', 26 => 'an Hindernis festgefahren',
+            27 => 'Basisstation ohne Strom', 101 => 'Andocken fehlgeschlagen',
+            102 => 'Basisstation nicht gefunden'
+        ];
+        return isset($r[$code]) ? $r[$code] : ('Grund ' . $code);
+    }
+
     public function Pause()  { return $this->DoAction(2, 2, []); }
     public function Stop()   { return $this->DoAction(4, 2, []); }
     public function Charge() { return $this->DoAction(3, 1, []); }
@@ -612,6 +804,12 @@ class DREAME extends IPSModule
                 $state = intval($p['2.1']);
                 $this->SetValueStringSafe('Zustand', $this->StateText($state));
                 $this->HandleRoomAutoReset($state);
+
+                // Auftrag gerade beendet -> Historie einmal nachziehen (nicht bei jedem Poll).
+                // Laeuft ohne eigenen Lock, weil UpdateStatus den Lock bereits haelt.
+                $busy = in_array($state, $this->BusyStates(), true) ? 1 : 0;
+                if ($busy == 0 && $this->ReadAttributeInteger('WasBusy') == 1) $this->FetchHistory();
+                if ($busy != $this->ReadAttributeInteger('WasBusy')) $this->WriteAttributeInteger('WasBusy', $busy);
             }
             if (isset($p['2.2'])) $this->SetValueStringSafe('Fehler', $this->ErrorText(intval($p['2.2'])));
             if (isset($p['3.1'])) $this->SetValueIntegerSafe('Battery', intval($p['3.1']));

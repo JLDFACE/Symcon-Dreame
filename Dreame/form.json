@@ -72,6 +72,15 @@
         },
         { "type": "Button", "caption": "Status jetzt abfragen", "onClick": "DREAME_UpdateStatus($id);" }
       ]
+    },
+    {
+      "type": "ExpansionPanel",
+      "caption": "Reinigungshistorie",
+      "items": [
+        { "type": "Label", "caption": "Die letzten Reinigungen kommen aus den Geräte-Ereignissen der Cloud und landen je Eintrag in zwei Variablen (Zeile + Details), damit eine Visualisierung sie direkt anbinden kann. Nach jedem beendeten Auftrag wird die Liste automatisch nachgezogen." },
+        { "type": "NumberSpinner", "name": "HistoryCount", "caption": "Anzahl Einträge", "minimum": 1, "maximum": 30 },
+        { "type": "Button", "caption": "Historie jetzt holen", "onClick": "DREAME_UpdateHistory($id);" }
+      ]
     }
   ],
   "actions": [
