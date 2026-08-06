@@ -54,7 +54,8 @@ class DREAME extends IPSModule
         $this->RegisterAttributeString('Auth', '');       // Token-Cache {access,refresh,exp,uid,tenant}
         $this->RegisterAttributeString('Device', '');      // {did,model,host}
         $this->RegisterAttributeString('MapsRooms', '');   // [{map_id,floor,rooms:[{seg,name}]}]
-        $this->RegisterAttributeInteger('SelectedMap', -1);
+        $this->RegisterAttributeInteger('SelectedMap', -1);  // gewaehlte Karte (Anzeige/Ziel)
+        $this->RegisterAttributeInteger('DeviceMap', -1);    // Karte, auf die das Geraet zuletzt umgeschaltet wurde
         $this->RegisterAttributeInteger('RoomCleaning', 0); // 1, sobald nach einer Raumauswahl aktiv gereinigt wurde
         $this->RegisterAttributeInteger('CleanModeDefaulted', 0); // 1, sobald der Reinigungsmodus initial vorbelegt wurde
         $this->RegisterAttributeInteger('RunSettingsDefaulted', 0); // 1, sobald Route/Saugkraft/Feuchte/Durchgaenge vorbelegt wurden
@@ -459,6 +460,11 @@ class DREAME extends IPSModule
         try {
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
+            // Auf der gewaehlten Etage reinigen, auch wenn der Wechsel vorher verschoben wurde
+            if (!$this->EnsureDeviceMap($this->ActiveMap())) {
+                $this->SetOnline(false, 'Kartenwechsel fehlgeschlagen.');
+                return false;
+            }
             // Vorwahlen (Modus, Saugkraft, Feuchte, Route) vor dem Start setzen
             $this->ApplyRunSettings();
             $r = $this->Action(2, 1, []);
@@ -499,12 +505,9 @@ class DREAME extends IPSModule
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
 
             // Bei mehreren Etagen: zuerst auf die Zielkarte umschalten
-            if ($mapId >= 0 && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
-                $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
-                $this->Action(6, 2, [['piid' => 4, 'value' => $sm]]);
-                $this->WriteAttributeInteger('SelectedMap', $mapId);
-                $this->ApplyMapSelection();   // Variable "Karte", Flags, Dropdown mitziehen
-                IPS_Sleep(4000);
+            if (!$this->EnsureDeviceMap($mapId)) {
+                $this->SetOnline(false, 'Kartenwechsel fehlgeschlagen.');
+                return false;
             }
 
             // Vorwahlen (Modus, Saugkraft, Feuchte, Route) setzen
@@ -1004,27 +1007,78 @@ class DREAME extends IPSModule
     }
 
     // Karte waehlen. $switchDevice = false, wenn das Geraet schon umgeschaltet ist.
+    //
+    // Wichtig: Der Kartenwechsel am Geraet (Action 6/2) bricht einen laufenden Auftrag ab.
+    // Waehlt man die Etage also, waehrend der Roboter arbeitet, folgt nur die ANZEIGE
+    // (Dropdown, Auswahlschalter, Flags) - das Geraet bleibt unangetastet und wird erst
+    // beim naechsten Start umgeschaltet (EnsureDeviceMap).
     private function SetSelectedMap($mapId, $switchDevice)
     {
         $maps = $this->MapList();
         if (count($maps) == 0) { $this->SetLastError('Es sind keine Karten eingelesen.'); return false; }
         if (!isset($maps[$mapId])) { $this->SetLastError('Unbekannte Karte ' . $mapId . '.'); return false; }
 
-        if ($switchDevice && $this->ReadAttributeInteger('SelectedMap') != $mapId) {
+        if ($switchDevice && $this->ReadAttributeInteger('DeviceMap') != $mapId) {
             if (!$this->Login(false) || $this->EnsureDevice(false) === false) {
                 $this->SetOnline(false, 'Kartenwechsel: keine Verbindung.');
                 return false;
             }
-            $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
-            if ($this->Action(6, 2, [['piid' => 4, 'value' => $sm]]) === false) {
+
+            $state = $this->CurrentState();
+            if (in_array($state, $this->BusyStates(), true)) {
+                // Auftrag laeuft -> nur die Anzeige umstellen, nicht das Geraet
+                $this->WriteAttributeInteger('SelectedMap', $mapId);
+                $this->ApplyMapSelection();
+                $this->SetLastError('Karte nur in der Anzeige gewechselt – der Roboter arbeitet gerade.');
+                $this->LogMessage('Kartenwechsel auf „' . $maps[$mapId] . '" verschoben, da ein Auftrag läuft ('
+                    . $this->StateText($state) . '). Das Gerät wird beim nächsten Start umgeschaltet.', KL_NOTIFY);
+                return true;
+            }
+
+            if (!$this->SwitchDeviceMap($mapId)) {
                 $this->SetOnline(false, 'Kartenwechsel fehlgeschlagen.');
                 return false;
             }
-            IPS_Sleep(4000);
         }
         $this->WriteAttributeInteger('SelectedMap', $mapId);
         $this->ApplyMapSelection();
         return true;
+    }
+
+    // Schaltet das Geraet auf die Karte um (Action 6/2) und merkt sich das.
+    // Nur aufrufen, wenn gerade KEIN Auftrag laeuft - sonst bricht die Fahrt ab.
+    private function SwitchDeviceMap($mapId)
+    {
+        $sm = json_encode(['sm' => (object)[], 'mapid' => $mapId]);
+        if ($this->Action(6, 2, [['piid' => 4, 'value' => $sm]]) === false) return false;
+        IPS_Sleep(4000);
+        $this->WriteAttributeInteger('DeviceMap', $mapId);
+        return true;
+    }
+
+    // Vor jedem Start: sicherstellen, dass das Geraet auf der gewuenschten Karte steht.
+    // Faengt die Faelle ab, in denen der Wechsel wegen eines laufenden Auftrags verschoben wurde.
+    private function EnsureDeviceMap($mapId)
+    {
+        if ($mapId < 0) return true;
+        if ($this->ReadAttributeInteger('DeviceMap') == $mapId) return true;
+        if (!$this->SwitchDeviceMap($mapId)) return false;
+        $this->WriteAttributeInteger('SelectedMap', $mapId);
+        $this->ApplyMapSelection();   // Variable "Karte", Flags, Dropdown mitziehen
+        return true;
+    }
+
+    // Aktueller Zustand (Property 2/1) frisch vom Geraet. -1 = nicht lesbar.
+    private function CurrentState()
+    {
+        $p = $this->GetProperties([[2, 1]]);
+        return isset($p['2.1']) ? intval($p['2.1']) : -1;
+    }
+
+    // Zustaende, in denen ein Auftrag laeuft oder pausiert ist.
+    private function BusyStates()
+    {
+        return [1, 3, 5, 7, 9, 10, 11, 12, 18, 21, 23, 27, 30, 121, 122];
     }
 
     // Zieht alles Raumbezogene auf die aktive Karte: Variable, Flags, Dropdown und
@@ -1193,7 +1247,7 @@ class DREAME extends IPSModule
     private function HandleRoomAutoReset($state)
     {
         // Zustaende, in denen der Roboter unterwegs bzw. mitten in der Reinigung ist
-        $busy = [1, 5, 7, 9, 10, 11, 12, 18, 21, 23, 27, 30, 121, 122];
+        $busy = $this->BusyStates();
         // Zustaende, die "an der Basis / fertig" bedeuten -> Auswahl darf geleert werden
         $done = [2, 6, 8, 13, 14, 22, 24];
 
