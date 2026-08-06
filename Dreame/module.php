@@ -1569,8 +1569,9 @@ class DREAME extends IPSModule
             0 => 'Kehren & wischen (zusammen)', 1 => 'Nur wischen',
             2 => 'Nur kehren', 3 => 'Erst kehren, dann wischen'
         ];
-        $label = isset($m[$bits]) ? $m[$bits] : ('Bits ' . $bits);
-        return $label . ' (roh ' . $raw . ')';
+        // Ohne den Rohwert - der diente der Verifikation der Bit-Zuordnung und macht
+        // den Text fuer die Visu zu lang.
+        return isset($m[$bits]) ? $m[$bits] : ('Bits ' . $bits);
     }
 
     // Reinigungsroute laut Geraet (Schluessel "CleanRoute" in Property 4/50).
