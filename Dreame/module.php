@@ -74,6 +74,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeInteger('RunSettingsDefaulted', 0); // 1, sobald Route/Saugkraft/Feuchte/Durchgaenge vorbelegt wurden
         $this->RegisterAttributeInteger('WasBusy', 0);              // 1, solange der letzte Poll einen laufenden Auftrag sah
         $this->RegisterAttributeString('Queue', '[]');              // vorgemerkte Raumcodes (Nachlaufliste)
+        $this->RegisterAttributeString('HistRooms', '{}');           // Startzeit => gereinigte Raeume (Cache)
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -99,8 +100,12 @@ class DREAME extends IPSModule
         // (siid 27, piid 1..4). Die Codes stammen aus der Referenz-Implementierung
         // (Tasshack/dreame-vacuum, Zweig dev - der Zweig "master" kennt siid 27 noch nicht).
         // Bernstein statt Rot: in dieser Visu gibt es keine Signalfarben.
+        // Beim Frischwasser sagt 27/1 nur, ob der Tank steckt. Dass er LEER ist, steht in
+        // 4/41 (LOW_WATER_WARNING: 0 keine, 1 quittiert, 2 kein Wasser, 3 nach der
+        // Reinigung, 4 fuer die Reinigung) - beides zusammen in einer Variable.
         $this->RegisterProfileStatus('DREAME.TankClean', 'Drops', [
-            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'fehlt', 0xC8901E], [2, 'fast leer', 0xC8901E]
+            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'fehlt', 0xC8901E],
+            [2, 'fast leer', 0xC8901E], [3, 'leer', 0xC8901E]
         ]);
         $this->RegisterProfileStatus('DREAME.TankDirty', 'Drops', [
             [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'voll oder fehlt', 0xC8901E]
@@ -108,17 +113,15 @@ class DREAME extends IPSModule
         $this->RegisterProfileStatus('DREAME.DustBag', 'Trashcan', [
             [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'fehlt', 0xC8901E], [2, 'prüfen', 0xC8901E]
         ]);
-        $this->RegisterProfileStatus('DREAME.Detergent', 'Drops', [
-            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'abgeschaltet', -1], [2, 'fast leer', 0xC8901E]
-        ]);
         $this->RegisterVariableInteger('TankClean', 'Frischwassertank', 'DREAME.TankClean', 72);
         $this->DisableAction('TankClean');
         $this->RegisterVariableInteger('TankDirty', 'Schmutzwassertank', 'DREAME.TankDirty', 73);
         $this->DisableAction('TankDirty');
         $this->RegisterVariableInteger('DustBag', 'Staubbeutel', 'DREAME.DustBag', 74);
         $this->DisableAction('DustBag');
-        $this->RegisterVariableInteger('Detergent', 'Reinigungsmittel', 'DREAME.Detergent', 75);
-        $this->DisableAction('Detergent');
+        // KEIN Reinigungsmittel-Status: 27/4 steht am X50 dauerhaft auf 1, was nach der
+        // Referenz "abgeschaltet" waere - gleichzeitig ist die Zugabe aber aktiv
+        // (4/37 = 1, 28/52 = 1). Die Bedeutung ist also unklar, deshalb keine Anzeige.
 
         // ---- Verschleissteile (Restwert in Prozent) ----
         $this->RegisterProfileInteger('DREAME.Wear', 'Gauge', '', ' %', 0, 100, 1);
@@ -277,10 +280,12 @@ class DREAME extends IPSModule
         // Zwischenstand von Build 10 abräumen: die Behaelter kamen dort aus Warncodes
         // (drei Boolesche + Klartextzeile), seit Build 11 aus siid 27. Die alten Namen
         // "Verbrauchsteil 1/2" heissen jetzt Antriebsräder und Kalkschutz.
-        foreach (['WarnText', 'BinFull', 'WaterEmpty', 'DirtyFull', 'Wear30', 'Wear31'] as $alt) {
+        foreach (['WarnText', 'BinFull', 'WaterEmpty', 'DirtyFull', 'Wear30', 'Wear31', 'Detergent'] as $alt) {
             if (@$this->GetIDForIdent($alt)) $this->UnregisterVariable($alt);
         }
-        if (IPS_VariableProfileExists('DREAME.Behaelter')) @IPS_DeleteVariableProfile('DREAME.Behaelter');
+        foreach (['DREAME.Behaelter', 'DREAME.Detergent'] as $prof) {
+            if (IPS_VariableProfileExists($prof)) @IPS_DeleteVariableProfile($prof);
+        }
 
         // Anzeigetexte, die nur beim Poll gefuellt werden, nicht leer stehen lassen
         if (GetValueString($this->GetIDForIdent('CurrentRoom')) == '') $this->SetValueStringSafe('CurrentRoom', '—');
@@ -863,12 +868,27 @@ class DREAME extends IPSModule
         if (!isset($d['data']['list']) || !is_array($d['data']['list'])) return false;
 
         $runs = [];
+        $geladen = 0;
         foreach ($d['data']['list'] as $item) {
             $raw = isset($item['history']) ? $item['history'] : (isset($item['value']) ? $item['value'] : '');
             $run = $this->ParseHistoryEntry($raw);
             if ($run === false) continue;
             // Das Geraet meldet denselben Auftrag gelegentlich mehrfach
             if (count($runs) > 0 && $runs[count($runs) - 1]['start'] == $run['start']) continue;
+
+            // Gereinigte Raeume aus der Reinigungskarte des Durchgangs nachziehen.
+            // Hoechstens drei Karten je Aufruf - jede ist ein eigener Download von ~50 kB;
+            // der Rest kommt beim naechsten Lauf aus dem Cache bzw. wird dann geholt.
+            if ($run['log'] != '') {
+                $cache = $this->ReadRoomCache();
+                $key   = strval($run['start']);
+                if (!isset($cache[$key]) && $geladen < 3) {
+                    $this->FetchLogRooms($run['start'], $run['log']);
+                    $geladen++;
+                    $cache = $this->ReadRoomCache();
+                }
+                if (isset($cache[$key]) && $cache[$key] != '') $run['info'] .= ' · ' . $cache[$key];
+            }
             $runs[] = $run;
         }
 
@@ -903,6 +923,9 @@ class DREAME extends IPSModule
         $start = intval($v[8]);
         $min   = isset($v[2]) ? intval($v[2]) : 0;
         $area  = isset($v[3]) ? intval($v[3]) : 0;
+        // piid 9 = Objektname der Reinigungskarte dieses Durchgangs (Clean-Log).
+        // In ihrem Trailer steht unter "sa" die Liste der gereinigten Segmente.
+        $log   = isset($v[9]) ? strval($v[9]) : '';
 
         $line = $this->WeekdayShort($start) . ' ' . date('d.m.', $start) . '  ' . date('H:i', $start)
             . '  ·  ' . $this->DurationText($min) . '  ·  ' . $area . ' m²';
@@ -927,7 +950,58 @@ class DREAME extends IPSModule
                 }
             }
         }
-        return ['start' => $start, 'line' => $line, 'info' => $info];
+        return ['start' => $start, 'line' => $line, 'info' => $info, 'log' => $log];
+    }
+
+    // =========================================================================
+    // Gereinigte Raeume je Historie-Eintrag
+    // =========================================================================
+    //
+    // Die Cloud-Events tragen die Raeume nicht - nur den Objektnamen der
+    // Reinigungskarte (Clean-Log). Deren Trailer enthaelt "sa" mit denselben
+    // Feldern wie CLEANING_PROPERTIES: [[Segment, Durchgaenge, Saugkraft, Feuchte, ...]].
+    // Bei einer Komplettreinigung fehlt "sa" bzw. ist leer.
+    private function ReadRoomCache()
+    {
+        $c = json_decode($this->ReadAttributeString('HistRooms'), true);
+        return is_array($c) ? $c : [];
+    }
+
+    // Laedt die Reinigungskarte und schreibt die Raumnamen in den Cache.
+    // Auch ein leeres Ergebnis wird gemerkt, damit nicht bei jedem Lauf neu geladen wird.
+    private function FetchLogRooms($start, $objectName)
+    {
+        $text = '';
+        $dev  = $this->EnsureDevice(false);
+        if ($dev !== false) {
+            $url = $this->GetDownloadUrl($dev, $objectName);
+            if ($url !== false) {
+                $raw = $this->HttpGet($url);
+                if ($raw !== false && $raw !== '') {
+                    $frame = $this->DecodeFrame($raw);
+                    if ($frame !== false && isset($frame['trailer']['sa']) && is_array($frame['trailer']['sa'])) {
+                        $mapId = $this->MapIdForFrame($frame);
+                        $names = [];
+                        foreach ($frame['trailer']['sa'] as $entry) {
+                            $seg = is_array($entry) ? intval($entry[0]) : intval($entry);
+                            if ($seg <= 0) continue;
+                            $name = $this->RoomLabel($mapId, $seg, false);
+                            $names[] = $name == '' ? ('Raum ' . $seg) : $name;
+                        }
+                        $text = implode(', ', $names);
+                    }
+                }
+            }
+        }
+        $cache = $this->ReadRoomCache();
+        $cache[strval($start)] = $text;
+        // Nur die jungsten 40 Eintraege behalten
+        if (count($cache) > 40) {
+            krsort($cache, SORT_NUMERIC);
+            $cache = array_slice($cache, 0, 40, true);
+        }
+        $this->WriteAttributeString('HistRooms', json_encode($cache));
+        return $text;
     }
 
     // Legt die Variablenpaare fuer die Historie an bzw. entfernt ueberzaehlige.
@@ -1000,9 +1074,9 @@ class DREAME extends IPSModule
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return; }
 
             $p = $this->GetProperties([
-                [2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 50],
+                [2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 41], [4, 50],
                 [9, 2], [10, 2], [11, 1], [16, 1], [30, 2], [31, 2],
-                [27, 1], [27, 2], [27, 3], [27, 4]
+                [27, 1], [27, 2], [27, 3]
             ]);
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
@@ -1038,11 +1112,14 @@ class DREAME extends IPSModule
             if (isset($p['30.2'])) $this->SetValueIntegerSafe('WearWheels', intval($p['30.2']));
             if (isset($p['31.2'])) $this->SetValueIntegerSafe('WearScale', intval($p['31.2']));
 
-            // Behaelter der Station: je einer einen eigenen Status (siid 27)
-            $this->SetValueIntegerSafe('TankClean', isset($p['27.1']) ? intval($p['27.1']) : -1);
+            // Behaelter der Station: je einer einen eigenen Status (siid 27).
+            // Frischwasser: 27/1 sagt nur "steckt", die Leermeldung kommt aus 4/41.
+            $tank = isset($p['27.1']) ? intval($p['27.1']) : -1;
+            $low  = isset($p['4.41']) ? intval($p['4.41']) : 0;
+            if ($tank == 0 && $low >= 2) $tank = 3;
+            $this->SetValueIntegerSafe('TankClean', $tank);
             $this->SetValueIntegerSafe('TankDirty', isset($p['27.2']) ? intval($p['27.2']) : -1);
             $this->SetValueIntegerSafe('DustBag',   isset($p['27.3']) ? intval($p['27.3']) : -1);
-            $this->SetValueIntegerSafe('Detergent', isset($p['27.4']) ? intval($p['27.4']) : -1);
 
             // Aktueller Raum + Nachlaufliste
             if ($state != -1) {
@@ -1449,6 +1526,8 @@ class DREAME extends IPSModule
         if ($f['grid'] <= 0 || $f['w'] <= 0 || $f['h'] <= 0) return false;
         if (strlen($bin) < 27 + ($f['w'] * $f['h'])) return false;
         $f['bin'] = $bin;
+        $trailer = json_decode(substr($bin, 27 + ($f['w'] * $f['h'])), true);
+        $f['trailer'] = is_array($trailer) ? $trailer : [];
         return $f;
     }
 
@@ -1490,11 +1569,12 @@ class DREAME extends IPSModule
 
     // Anzeigename eines Raums; bei mehreren Etagen mit Etage in Klammern ("Küche (EG)").
     // Bewusst nicht das Dropdown-Format "EG . Küche" - als Satzanfang in der Visu
-    // ("reinigt gerade") liest sich der Raum zuerst besser.
-    private function RoomLabel($mapId, $seg)
+    // ("reinigt gerade") liest sich der Raum zuerst besser. In Listen (Historie,
+    // Vormerkung) stoert die Etage hinter jedem Namen, daher $mitEtage.
+    private function RoomLabel($mapId, $seg, $mitEtage = true)
     {
         $code = ($mapId * 1000) + $seg;
-        $mehrere = count($this->MapList()) > 1;
+        $mehrere = $mitEtage && count($this->MapList()) > 1;
         foreach ($this->RoomEntries() as $e) {
             if ($e['code'] != $code) continue;
             return $mehrere ? ($e['name'] . ' (' . $e['floor'] . ')') : $e['name'];
