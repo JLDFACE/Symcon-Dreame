@@ -98,11 +98,19 @@ class DREAME extends IPSModule
         // (2/2). "Hinweis" zeigt den Klartext, die drei Schalter machen ihn auswertbar.
         $this->RegisterVariableString('WarnText', 'Hinweis', '', 71);
         IPS_SetIcon($this->GetIDForIdent('WarnText'), 'Information');
-        $this->RegisterVariableBoolean('BinFull', 'Staubbeutel voll', '~Alert', 72);
+        // Eigenes Profil statt ~Alert: "Alarm" ist fuer einen vollen Staubbeutel zu laut,
+        // und die Visu soll den Zustand im Klartext zeigen.
+        if (!IPS_VariableProfileExists('DREAME.Behaelter')) {
+            IPS_CreateVariableProfile('DREAME.Behaelter', 0);
+            IPS_SetVariableProfileIcon('DREAME.Behaelter', 'Information');
+        }
+        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 0, 'in Ordnung', '', -1);
+        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 1, 'prüfen', '', -1);
+        $this->RegisterVariableBoolean('BinFull', 'Staubbeutel voll', 'DREAME.Behaelter', 72);
         $this->DisableAction('BinFull');
-        $this->RegisterVariableBoolean('WaterEmpty', 'Frischwasser leer', '~Alert', 73);
+        $this->RegisterVariableBoolean('WaterEmpty', 'Frischwasser leer', 'DREAME.Behaelter', 73);
         $this->DisableAction('WaterEmpty');
-        $this->RegisterVariableBoolean('DirtyFull', 'Schmutzwasser voll', '~Alert', 74);
+        $this->RegisterVariableBoolean('DirtyFull', 'Schmutzwasser voll', 'DREAME.Behaelter', 74);
         $this->DisableAction('DirtyFull');
 
         // ---- Verschleissteile (Restwert in Prozent) ----
