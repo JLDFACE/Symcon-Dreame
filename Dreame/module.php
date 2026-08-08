@@ -26,8 +26,17 @@
  *   State 2/1, Error 2/2, Akku 3/1, Charging 3/2, Status 4/1, Reinigungszeit 4/2,
  *   Flaeche 4/3, Saugkraft 4/4, Wasser/Moppfeuchte 4/5, Wassertank 4/6, Task 4/7,
  *   CLEANING_PROPERTIES 4/10, Reinigungsmodus 4/23 (gepackt), CUSTOMIZED_CLEANING 4/26,
- *   AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a. "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   Warnstatus 4/35, "kein Wasser" 4/41, AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a.
+ *   "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   Verschleiss (je Teil piid 1 = Rest in Stunden bzw. Prozent, piid 2 = das jeweils andere):
+ *   Hauptbuerste 9/2 %, Seitenbuerste 10/2 %, Filter 11/1 %, Sensoren 16/1 %,
+ *   zwei weitere Teile 30/2 % und 31/2 % (Zuordnung am Geraet noch offen, siehe Variablennamen).
  *   Aktionen: Alles=2/1, Pause=2/2, ZurBasis=3/1, RaumStart=4/1, Stop=4/2, WarnungLoeschen=4/3, Orten=7/1, Kartenwechsel=6/2.
+ *
+ * Aktueller Raum: das Geraet legt die LIVE-Karte als OSS-Objekt neben der Kartenliste ab -
+ *   gleicher Pfad, Dateiname "0" (MAP_LIST 6/8 zeigt auf ".../9"). Deren Kopf enthaelt die
+ *   Roboterposition (int16 bei Offset 5/7), Raster/Groesse/Ursprung (17..25); im Bild steckt
+ *   je Pixel das Segment in den oberen 6 Bits (pixel >> 2). Daraus folgt der Raum.
  */
 
 class DREAME extends IPSModule
@@ -62,6 +71,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeInteger('CleanModeDefaulted', 0); // 1, sobald der Reinigungsmodus initial vorbelegt wurde
         $this->RegisterAttributeInteger('RunSettingsDefaulted', 0); // 1, sobald Route/Saugkraft/Feuchte/Durchgaenge vorbelegt wurden
         $this->RegisterAttributeInteger('WasBusy', 0);              // 1, solange der letzte Poll einen laufenden Auftrag sah
+        $this->RegisterAttributeString('Queue', '[]');              // vorgemerkte Raumcodes (Nachlaufliste)
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -74,10 +84,44 @@ class DREAME extends IPSModule
 
         // ---- Status ----
         $this->RegisterVariableString('Zustand', 'Zustand', '', 30);
+        // Raum, in dem der Roboter gerade arbeitet (aus der Live-Karte, siehe UpdateCurrentRoom)
+        $this->RegisterVariableString('CurrentRoom', 'Aktueller Raum', '', 35);
+        IPS_SetIcon($this->GetIDForIdent('CurrentRoom'), 'Move');
         $this->RegisterVariableInteger('Battery', 'Akku', '~Battery.100', 40);
         $this->RegisterVariableString('Fehler', 'Fehler', '', 50);
         $this->RegisterVariableInteger('CleaningTime', 'Reinigungszeit (min)', '', 60);
         $this->RegisterVariableFloat('CleaningArea', 'Gereinigte Fläche (m²)', '', 70);
+
+        // ---- Behaelter / Station ----
+        // Das Geraet meldet KEINE Fuellstaende in Prozent fuer Staubbeutel, Frisch- und
+        // Schmutzwasser, sondern nur Warnungen: als Warnstatus (4/35) bzw. als Fehlercode
+        // (2/2). "Hinweis" zeigt den Klartext, die drei Schalter machen ihn auswertbar.
+        $this->RegisterVariableString('WarnText', 'Hinweis', '', 71);
+        IPS_SetIcon($this->GetIDForIdent('WarnText'), 'Information');
+        $this->RegisterVariableBoolean('BinFull', 'Staubbeutel voll', '~Alert', 72);
+        $this->DisableAction('BinFull');
+        $this->RegisterVariableBoolean('WaterEmpty', 'Frischwasser leer', '~Alert', 73);
+        $this->DisableAction('WaterEmpty');
+        $this->RegisterVariableBoolean('DirtyFull', 'Schmutzwasser voll', '~Alert', 74);
+        $this->DisableAction('DirtyFull');
+
+        // ---- Verschleissteile (Restwert in Prozent) ----
+        $this->RegisterProfileInteger('DREAME.Wear', 'Gauge', '', ' %', 0, 100, 1);
+        $this->RegisterVariableInteger('WearMainBrush', 'Hauptbürste', 'DREAME.Wear', 140);
+        $this->DisableAction('WearMainBrush');
+        $this->RegisterVariableInteger('WearSideBrush', 'Seitenbürste', 'DREAME.Wear', 141);
+        $this->DisableAction('WearSideBrush');
+        $this->RegisterVariableInteger('WearFilter', 'Filter', 'DREAME.Wear', 142);
+        $this->DisableAction('WearFilter');
+        $this->RegisterVariableInteger('WearSensor', 'Sensoren', 'DREAME.Wear', 143);
+        $this->DisableAction('WearSensor');
+        // Zwei weitere Teile meldet der X50 unter siid 30 und 31. Welches Teil das jeweils
+        // ist, sagt die Cloud nicht (die Klartextdatei des Geraets kennt nur Zustandstexte)
+        // - Namen erst setzen, wenn der Abgleich mit der App das bestaetigt.
+        $this->RegisterVariableInteger('Wear30', 'Verbrauchsteil 1', 'DREAME.Wear', 144);
+        $this->DisableAction('Wear30');
+        $this->RegisterVariableInteger('Wear31', 'Verbrauchsteil 2', 'DREAME.Wear', 145);
+        $this->DisableAction('Wear31');
 
         // ---- Steuerung: Aktion (Dropdown) ----
         $this->RegisterProfileInteger('DREAME.Action', 'Execute', '', '', 0, 0, 0);
@@ -89,10 +133,17 @@ class DREAME extends IPSModule
             [4, 'Zur Basis', '', -1],
             [5, 'Orten (Piepen)', '', -1],
             [6, 'Ausgewählte Räume reinigen', '', 0x00A000],
-            [7, 'Auswahl leeren', '', -1]
+            [7, 'Auswahl leeren', '', -1],
+            [8, 'Ausgewählte Räume anhängen', '', 0x0080FF],
+            [9, 'Vormerkung leeren', '', -1]
         ]);
         $this->RegisterVariableInteger('Aktion', 'Aktion', 'DREAME.Action', 80);
         $this->EnableAction('Aktion');
+
+        // Raeume, die waehrend eines laufenden Auftrags angehaengt wurden (Nachlaufliste).
+        // Sie starten als eigener Durchgang, sobald der Roboter wieder an der Station ist.
+        $this->RegisterVariableString('QueueText', 'Vorgemerkte Räume', '', 81);
+        IPS_SetIcon($this->GetIDForIdent('QueueText'), 'Clock');
 
         // ---- Steuerung: Reinigungsmodus (Dropdown) ----
         // Wird vor dem Start ins Modusfeld (untere 2 Bits) der gepackten Property
@@ -207,6 +258,10 @@ class DREAME extends IPSModule
 
         // Historie-Variablen an die eingestellte Anzahl anpassen
         $this->SyncHistoryVariables();
+
+        // Anzeigetexte, die nur beim Poll gefuellt werden, nicht leer stehen lassen
+        if (GetValueString($this->GetIDForIdent('CurrentRoom')) == '') $this->SetValueStringSafe('CurrentRoom', '—');
+        $this->SetValueStringSafe('QueueText', $this->QueueLabel($this->ReadQueue()));
 
         // Karten-/Raumprofil + Auswahlschalter aus gespeicherten Karten/Filter wiederherstellen
         $this->RebuildMapProfile();
@@ -356,6 +411,8 @@ class DREAME extends IPSModule
                 case 5: $this->Locate(); break;
                 case 6: $this->CleanSelectedRooms(); break;
                 case 7: $this->ClearRoomSelection(); break;
+                case 8: $this->QueueSelectedRooms(); break;
+                case 9: $this->ClearQueue(); break;
             }
             // Auswahl wieder auf "—" zuruecksetzen
             $this->SetValueIntegerSafe('Aktion', 0);
@@ -513,6 +570,18 @@ class DREAME extends IPSModule
 
         if (!$this->TryLock()) return false;
         try {
+            return $this->StartRooms($mapId, $segs);
+        } finally {
+            $this->Unlock();
+        }
+    }
+
+    // Eigentlicher Raumstart OHNE Lock. Getrennt, weil die Nachlaufliste aus dem Poll
+    // heraus startet - der haelt den Lock bereits, und IPS_SemaphoreEnter ist nicht
+    // wiedereintrittsfaehig.
+    private function StartRooms($mapId, $segs)
+    {
+        {
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return false; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return false; }
 
@@ -557,8 +626,6 @@ class DREAME extends IPSModule
             $this->WriteAttributeInteger('RoomCleaning', 1);
             $this->BumpFastPoll();
             return true;
-        } finally {
-            $this->Unlock();
         }
     }
 
@@ -600,6 +667,119 @@ class DREAME extends IPSModule
             if (GetValueBoolean($cid) !== false) SetValueBoolean($cid, false);
         }
         return true;
+    }
+
+    // =========================================================================
+    // Nachlaufliste: Raeume waehrend eines laufenden Auftrags anhaengen
+    // =========================================================================
+    //
+    // Der Roboter kennt kein "Raum zur laufenden Fahrt hinzufuegen": ein zweiter
+    // Aufruf von Action 4/1 waere ein NEUER Auftrag - bereits gereinigte Raeume kaemen
+    // noch einmal dran, und ob der X50 den laufenden Auftrag sauber ersetzt oder erst
+    // abbricht, ist offen. Deshalb werden die Raeume gemerkt und als eigener Durchgang
+    // gestartet, sobald der Roboter wieder an der Station ist (ProcessQueue).
+
+    // Haengt die angehakten Raeume an. Laeuft gerade nichts, wird sofort gestartet.
+    public function QueueSelectedRooms()
+    {
+        $codes = $this->GetSelectedRoomCodes();
+        if (count($codes) == 0) {
+            $this->SetLastError('Kein Raum ausgewählt.');
+            echo 'Es ist kein Raum ausgewählt.';
+            return false;
+        }
+
+        if (!$this->Login(false) || $this->EnsureDevice(false) === false) {
+            $this->SetOnline(false, 'Keine Verbindung.');
+            return false;
+        }
+        $state = $this->CurrentState();
+        if (!in_array($state, $this->BusyStates(), true)) {
+            // Nichts unterwegs -> das Anhaengen waere nur ein Umweg
+            return $this->CleanSelectedRooms();
+        }
+
+        $queue = $this->ReadQueue();
+        foreach ($codes as $c) {
+            if (!in_array($c, $queue, true)) $queue[] = $c;
+        }
+        $this->WriteQueue($queue);
+        // Auswahl leeren, damit man den naechsten Schwung anhaken kann
+        $this->ClearRoomSelection();
+        $this->SetLastError('');
+        return true;
+    }
+
+    // Verwirft die Vormerkung.
+    public function ClearQueue()
+    {
+        $this->WriteQueue([]);
+        return true;
+    }
+
+    private function ReadQueue()
+    {
+        $q = json_decode($this->ReadAttributeString('Queue'), true);
+        if (!is_array($q)) return [];
+        $out = [];
+        foreach ($q as $c) {
+            $c = intval($c);
+            if ($c > 0 && !in_array($c, $out, true)) $out[] = $c;
+        }
+        return $out;
+    }
+
+    private function WriteQueue($codes)
+    {
+        $this->WriteAttributeString('Queue', json_encode(array_values($codes)));
+        $this->SetValueStringSafe('QueueText', $this->QueueLabel($codes));
+    }
+
+    // Klartext fuer die Visu: "Küche, Flur" bzw. "—".
+    private function QueueLabel($codes)
+    {
+        if (count($codes) == 0) return '—';
+        $names = [];
+        $entries = $this->RoomEntries();
+        foreach ($codes as $c) {
+            $name = 'Raum ' . ($c % 1000);
+            foreach ($entries as $e) {
+                if ($e['code'] == $c) { $name = $e['label']; break; }
+            }
+            $names[] = $name;
+        }
+        return implode(', ', $names);
+    }
+
+    // Startet die Vormerkung, sobald der Roboter zurueck an der Station ist.
+    // Wird aus UpdateStatus aufgerufen und laeuft daher OHNE eigenen Lock.
+    private function ProcessQueue($state)
+    {
+        $codes = $this->ReadQueue();
+        if (count($codes) == 0) return;
+
+        // Erst starten, wenn der Auftrag wirklich durch ist. Moppwäsche (9/20) wird
+        // abgewartet, Trocknen (8) und Selbstentleerung (22) nicht - das dauert Stunden.
+        $ready = [2, 6, 8, 13, 14, 22, 24];
+        if (!in_array($state, $ready, true)) return;
+
+        // Ein Durchgang deckt nur eine Etage ab
+        $byMap = [];
+        foreach ($codes as $c) $byMap[intdiv($c, 1000)][] = $c % 1000;
+        $mapId = -1;
+        $segs  = [];
+        foreach ($byMap as $m => $s) { $mapId = intval($m); $segs = $s; break; }
+        $rest = [];
+        foreach ($codes as $c) {
+            if (intdiv($c, 1000) != $mapId) $rest[] = $c;
+        }
+
+        $this->LogMessage('Vorgemerkte Räume werden gestartet: ' . $this->QueueLabel($codes), KL_NOTIFY);
+        $ok = $this->StartRooms($mapId, $segs);
+        // Erfolg oder nicht - die Vormerkung ist verbraucht, sonst laeuft sie in eine
+        // Schleife. Bei Misserfolg steht der Grund in "Letzter Fehler".
+        $this->WriteQueue($rest);
+        if (!$ok) $this->SetLastError('Vorgemerkte Räume konnten nicht gestartet werden.');
     }
 
     // =========================================================================
@@ -796,10 +976,14 @@ class DREAME extends IPSModule
             if (!$this->Login(false)) { $this->SetOnline(false, 'Login fehlgeschlagen.'); return; }
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return; }
 
-            $p = $this->GetProperties([[2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 50]]);
+            $p = $this->GetProperties([
+                [2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 35], [4, 41], [4, 50],
+                [9, 2], [10, 2], [11, 1], [16, 1], [30, 2], [31, 2]
+            ]);
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
 
+            $state = -1;
             if (isset($p['2.1'])) {
                 $state = intval($p['2.1']);
                 $this->SetValueStringSafe('Zustand', $this->StateText($state));
@@ -821,10 +1005,42 @@ class DREAME extends IPSModule
                 $route = $this->ParseAutoSwitch($p['4.50'], 'CleanRoute');
                 $this->SetValueStringSafe('DeviceRoute', $route === null ? 'nicht unterstützt' : $this->CleanRouteText($route));
             }
+
+            // Verschleissteile: Restwert in Prozent
+            if (isset($p['9.2']))  $this->SetValueIntegerSafe('WearMainBrush', intval($p['9.2']));
+            if (isset($p['10.2'])) $this->SetValueIntegerSafe('WearSideBrush', intval($p['10.2']));
+            if (isset($p['11.1'])) $this->SetValueIntegerSafe('WearFilter', intval($p['11.1']));
+            if (isset($p['16.1'])) $this->SetValueIntegerSafe('WearSensor', intval($p['16.1']));
+            if (isset($p['30.2'])) $this->SetValueIntegerSafe('Wear30', intval($p['30.2']));
+            if (isset($p['31.2'])) $this->SetValueIntegerSafe('Wear31', intval($p['31.2']));
+
+            // Behaelter: das Geraet meldet nur Warnungen, keine Fuellstaende
+            $warn = isset($p['4.35']) ? intval($p['4.35']) : 0;
+            $err  = isset($p['2.2']) ? intval($p['2.2']) : 0;
+            $noWater = isset($p['4.41']) ? intval($p['4.41']) : 0;
+            $this->SetValueStringSafe('WarnText', $warn == 0 ? '—' : $this->ErrorText($warn));
+            $codes = [$warn, $err];
+            $this->SetValueBooleanSafe('BinFull', $this->AnyCode($codes, [11, 101, 102, 103, 104, 121]));
+            $this->SetValueBooleanSafe('WaterEmpty', $noWater == 1 || $this->AnyCode($codes, [10, 105, 107, 116, 123, 213]));
+            $this->SetValueBooleanSafe('DirtyFull', $this->AnyCode($codes, [106, 108, 109, 110, 118, 214, 227]));
+
+            // Aktueller Raum + Nachlaufliste
+            if ($state != -1) {
+                $this->UpdateCurrentRoom($state);
+                $this->ProcessQueue($state);
+            }
         } finally {
             $this->Unlock();
             $this->UpdatePollTimer(false);
         }
+    }
+
+    private function AnyCode($values, $codes)
+    {
+        foreach ($values as $v) {
+            if ($v != 0 && in_array(intval($v), $codes, true)) return true;
+        }
+        return false;
     }
 
     // =========================================================================
@@ -1094,10 +1310,8 @@ class DREAME extends IPSModule
             if ($bin === false) continue;
             if (strlen($bin) < 27) continue;
 
-            $w = unpack('v', substr($bin, 19, 2));
-            $h = unpack('v', substr($bin, 21, 2));
-            $w = $w[1];
-            $h = $h[1];
+            $w = $this->Int16($bin, 19);
+            $h = $this->Int16($bin, 21);
             $imgEnd = 27 + ($w * $h);
             if (strlen($bin) <= $imgEnd) continue;
             $trailer = substr($bin, $imgEnd);
@@ -1113,9 +1327,144 @@ class DREAME extends IPSModule
                 $index = isset($s['index']) ? intval($s['index']) : 0;
                 $rooms[] = ['seg' => $sid, 'name' => $this->RoomName($type, $index, $sid)];
             }
-            $maps[] = ['map_id' => $mapId, 'floor' => $floor, 'rooms' => $rooms];
+            // Ursprung/Raster mitschreiben: damit laesst sich ein Live-Frame der richtigen
+            // Etage zuordnen (die Segmentnummern wiederholen sich zwischen den Karten).
+            $geo = [
+                'left' => $this->Int16($bin, 23),
+                'top'  => $this->Int16($bin, 25),
+                'grid' => $this->Int16($bin, 17),
+                'w'    => $w,
+                'h'    => $h
+            ];
+            $maps[] = ['map_id' => $mapId, 'floor' => $floor, 'rooms' => $rooms, 'geo' => $geo];
         }
         return $maps;
+    }
+
+    // =========================================================================
+    // Aktueller Raum aus der Live-Karte
+    // =========================================================================
+    //
+    // Die Live-Karte liegt im selben OSS-Ordner wie die Kartenliste, Dateiname "0".
+    // Sie ist ein einzelner Frame (kein "mapstr"-Umschlag): Kopf mit Roboterposition
+    // und Rasterangaben, danach ein Byte je Rasterzelle mit dem Segment in Bit 2..7.
+    // Das Geraet schreibt sie nur alle paar Minuten neu - die Anzeige hinkt also
+    // etwas nach, was fuer "welchen Raum macht er gerade" ausreicht.
+    private function UpdateCurrentRoom($state)
+    {
+        if (!in_array($state, $this->BusyStates(), true)) {
+            $this->SetValueStringSafe('CurrentRoom', '—');
+            $this->SetBuffer('RoomAt', '0');
+            return;
+        }
+        // Die Karte ist ~50 kB - hoechstens alle 30 s laden
+        $last = intval($this->GetBuffer('RoomAt'));
+        if ($last > 0 && (time() - $last) < 30) return;
+        $this->SetBuffer('RoomAt', strval(time()));
+
+        $name = $this->FetchCurrentRoom();
+        if ($name !== false) $this->SetValueStringSafe('CurrentRoom', $name);
+    }
+
+    // Rueckgabe: Raumbezeichnung, 'unterwegs' oder false (nicht ermittelbar).
+    private function FetchCurrentRoom()
+    {
+        $dev = $this->EnsureDevice(false);
+        if ($dev === false) return false;
+
+        $ml = $this->GetProperties([[6, 8]]);
+        if (!isset($ml['6.8'])) return false;
+        $mlv = json_decode($ml['6.8'], true);
+        if (!isset($mlv['object_name'])) return false;
+        $slash = strrpos($mlv['object_name'], '/');
+        if ($slash === false) return false;
+
+        $url = $this->GetDownloadUrl($dev, substr($mlv['object_name'], 0, $slash + 1) . '0');
+        if ($url === false) return false;
+        $raw = $this->HttpGet($url);
+        if ($raw === false || $raw === '') return false;
+
+        $frame = $this->DecodeFrame($raw);
+        if ($frame === false) return false;
+
+        $seg = $this->SegmentAt($frame);
+        if ($seg <= 0) return 'unterwegs';
+
+        $mapId = $this->MapIdForFrame($frame);
+        $name  = $this->RoomLabel($mapId, $seg);
+        return $name == '' ? ('Raum ' . $seg) : $name;
+    }
+
+    // Einzelner Kartenframe: base64(url-sicher) + zlib. false, wenn unbrauchbar.
+    private function DecodeFrame($raw)
+    {
+        $s = str_replace(['_', '-'], ['/', '+'], trim(strval($raw)));
+        $comma = strpos($s, ',');
+        if ($comma !== false) $s = substr($s, 0, $comma);
+        $blob = base64_decode($s);
+        if ($blob === false) return false;
+        $bin = @gzuncompress($blob);
+        if ($bin === false || strlen($bin) < 27) return false;
+
+        $f = [
+            'rx'   => $this->Int16($bin, 5),
+            'ry'   => $this->Int16($bin, 7),
+            'grid' => $this->Int16($bin, 17),
+            'w'    => $this->Int16($bin, 19),
+            'h'    => $this->Int16($bin, 21),
+            'left' => $this->Int16($bin, 23),
+            'top'  => $this->Int16($bin, 25)
+        ];
+        if ($f['grid'] <= 0 || $f['w'] <= 0 || $f['h'] <= 0) return false;
+        if (strlen($bin) < 27 + ($f['w'] * $f['h'])) return false;
+        $f['bin'] = $bin;
+        return $f;
+    }
+
+    private function Int16($bin, $offset)
+    {
+        $v = unpack('v', substr($bin, $offset, 2));
+        $v = $v[1];
+        return $v > 32767 ? $v - 65536 : $v;
+    }
+
+    // Segment unter dem Roboter. 0 = kein Raum (Fahrweg/unbekannt), -1 = ausserhalb.
+    private function SegmentAt($f)
+    {
+        $px = intval(floor(($f['rx'] - $f['left']) / $f['grid']));
+        $py = intval(floor(($f['ry'] - $f['top']) / $f['grid']));
+        if ($px < 0 || $px >= $f['w'] || $py < 0 || $py >= $f['h']) return -1;
+        return ord($f['bin'][27 + ($py * $f['w']) + $px]) >> 2;
+    }
+
+    // Zu welcher gespeicherten Karte gehoert der Frame? Verglichen wird der Ursprung,
+    // weil die Segmentnummern zwischen den Etagen gleich sind. Rueckfall: aktive Karte.
+    private function MapIdForFrame($f)
+    {
+        $maps = json_decode($this->ReadAttributeString('MapsRooms'), true);
+        $best = -1;
+        $bestDist = -1;
+        if (is_array($maps)) {
+            foreach ($maps as $m) {
+                if (!isset($m['geo'])) continue;
+                $g = $m['geo'];
+                $dist = abs(intval($g['left']) - $f['left']) + abs(intval($g['top']) - $f['top']);
+                if ($bestDist < 0 || $dist < $bestDist) { $bestDist = $dist; $best = intval($m['map_id']); }
+            }
+        }
+        // Mehr als 20 m daneben ist keine Uebereinstimmung mehr
+        if ($best >= 0 && $bestDist <= 2000) return $best;
+        return $this->ActiveMap();
+    }
+
+    // Anzeigename eines Raums; bei mehreren Etagen mit Etagenpraefix ("EG . Küche").
+    private function RoomLabel($mapId, $seg)
+    {
+        $code = ($mapId * 1000) + $seg;
+        foreach ($this->RoomEntries() as $e) {
+            if ($e['code'] == $code) return $e['label'];
+        }
+        return '';
     }
 
     private function RoomName($type, $index, $segId)
@@ -1549,14 +1898,23 @@ class DREAME extends IPSModule
 
     private function StateText($code)
     {
+        // Ergaenzt aus der Klartextdatei des Geraets (keyDefine "2.1", deutsche Spalte),
+        // die die Cloud im Geraetedatensatz verlinkt.
         $s = [
             -1 => 'Unbekannt', 1 => 'Saugen', 2 => 'Leerlauf', 3 => 'Pausiert', 4 => 'Fehler',
             5 => 'Rückkehr zur Basis', 6 => 'Lädt', 7 => 'Wischen', 8 => 'Trocknen', 9 => 'Moppwäsche',
             10 => 'Rückkehr zur Wäsche', 11 => 'Karte wird erstellt', 12 => 'Saugen & Wischen',
-            13 => 'Vollständig geladen', 14 => 'Aktualisierung', 21 => 'Moppwäsche pausiert',
+            13 => 'Vollständig geladen', 14 => 'Aktualisierung', 15 => 'Zur Reinigung gerufen',
+            16 => 'Basisstation repariert sich', 17 => 'Rückkehr zum Moppmontieren',
+            18 => 'Rückkehr zum Moppabnehmen', 19 => 'Selbsttest Wasserzufuhr/Entwässerung',
+            20 => 'Mopp reinigen & Wasser nachfüllen', 21 => 'Moppwäsche pausiert',
             22 => 'Selbstentleerung', 23 => 'Fernsteuerung', 24 => 'Intelligentes Laden',
-            27 => 'Punktreinigung', 30 => 'Stationsreinigung', 121 => 'Fährt in die Basis',
-            122 => 'Verlässt die Basis'
+            25 => 'Zweite Reinigung', 26 => 'Folgen', 27 => 'Punktreinigung',
+            28 => 'Rückfahrt zur Staubentleerung', 29 => 'Wartet auf Aufgaben',
+            30 => 'Stationsreinigung', 33 => 'Wasserzufuhr wird entleert',
+            97 => 'Shortcut läuft', 98 => 'Kameraüberwachung', 99 => 'Kameraüberwachung pausiert',
+            101 => 'Erste Tiefenreinigung', 102 => 'Erste Tiefenreinigung pausiert',
+            121 => 'Fährt in die Basis', 122 => 'Verlässt die Basis'
         ];
         return isset($s[$code]) ? ($s[$code] . ' (' . $code . ')') : ('Status ' . $code);
     }
