@@ -105,7 +105,7 @@ class DREAME extends IPSModule
             IPS_SetVariableProfileIcon('DREAME.Behaelter', 'Information');
         }
         IPS_SetVariableProfileAssociation('DREAME.Behaelter', 0, 'in Ordnung', '', -1);
-        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 1, 'prüfen', '', -1);
+        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 1, 'prüfen', '', 0xC8901E);   // Bernstein, kein Rot
         $this->RegisterVariableBoolean('BinFull', 'Staubbeutel voll', 'DREAME.Behaelter', 72);
         $this->DisableAction('BinFull');
         $this->RegisterVariableBoolean('WaterEmpty', 'Frischwasser leer', 'DREAME.Behaelter', 73);
@@ -752,7 +752,7 @@ class DREAME extends IPSModule
         foreach ($codes as $c) {
             $name = 'Raum ' . ($c % 1000);
             foreach ($entries as $e) {
-                if ($e['code'] == $c) { $name = $e['label']; break; }
+                if ($e['code'] == $c) { $name = $e['name']; break; }
             }
             $names[] = $name;
         }
@@ -1465,12 +1465,16 @@ class DREAME extends IPSModule
         return $this->ActiveMap();
     }
 
-    // Anzeigename eines Raums; bei mehreren Etagen mit Etagenpraefix ("EG . Küche").
+    // Anzeigename eines Raums; bei mehreren Etagen mit Etage in Klammern ("Küche (EG)").
+    // Bewusst nicht das Dropdown-Format "EG . Küche" - als Satzanfang in der Visu
+    // ("reinigt gerade") liest sich der Raum zuerst besser.
     private function RoomLabel($mapId, $seg)
     {
         $code = ($mapId * 1000) + $seg;
+        $mehrere = count($this->MapList()) > 1;
         foreach ($this->RoomEntries() as $e) {
-            if ($e['code'] == $code) return $e['label'];
+            if ($e['code'] != $code) continue;
+            return $mehrere ? ($e['name'] . ' (' . $e['floor'] . ')') : $e['name'];
         }
         return '';
     }
