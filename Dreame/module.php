@@ -1365,6 +1365,13 @@ class DREAME extends IPSModule
             $this->SetBuffer('RoomAt', '0');
             return;
         }
+        // Waehrend Moppwäsche, Trocknen oder Entleeren steht er an der Station - die
+        // Karte zeigt dann noch den zuletzt gereinigten Raum, was die Anzeige verfaelscht.
+        if (in_array($state, [8, 9, 10, 20, 21, 22, 28, 30, 33], true)) {
+            $this->SetValueStringSafe('CurrentRoom', 'an der Station');
+            $this->SetBuffer('RoomAt', '0');
+            return;
+        }
         // Die Karte ist ~50 kB - hoechstens alle 30 s laden
         $last = intval($this->GetBuffer('RoomAt'));
         if ($last > 0 && (time() - $last) < 30) return;
