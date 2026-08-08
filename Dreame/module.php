@@ -887,7 +887,7 @@ class DREAME extends IPSModule
                     $geladen++;
                     $cache = $this->ReadRoomCache();
                 }
-                if (isset($cache[$key]) && $cache[$key] != '') $run['info'] .= ' · ' . $cache[$key];
+                if (isset($cache[$key]) && $cache[$key] != '') $run['info'] = $cache[$key] . ' · ' . $run['erg'];
             }
             $runs[] = $run;
         }
@@ -938,19 +938,23 @@ class DREAME extends IPSModule
         $erg = ['0' => 'unterbrochen', '1' => 'abgeschlossen', '2' => 'manuell beendet', '3' => 'fehlgeschlagen'];
         $ergText = isset($v[13]) && isset($erg[strval(intval($v[13]))]) ? $erg[strval(intval($v[13]))] : 'unbekannt';
 
-        $info = $art . ' · ' . $ergText;
-
         // Abbruchgrund, falls das Geraet einen mitgeschickt hat
         if (isset($v[10])) {
             $props = json_decode(strval($v[10]), true);
             if (is_array($props) && isset($props['abnormal_end'])) {
                 $reason = json_decode(strval($props['abnormal_end']), true);
                 if (is_array($reason) && isset($reason[0]) && intval($reason[0]) != 0) {
-                    $info .= ' (' . $this->InterruptText(intval($reason[0])) . ')';
+                    $ergText .= ' (' . $this->InterruptText(intval($reason[0])) . ')';
                 }
             }
         }
-        return ['start' => $start, 'line' => $line, 'info' => $info, 'log' => $log];
+        // "art" wird durch die Raumliste ersetzt, sobald die bekannt ist (FetchHistory):
+        // "Küche, Flur · abgeschlossen" sagt mehr als "Raumreinigung · abgeschlossen"
+        // und passt in eine Zeile.
+        return [
+            'start' => $start, 'line' => $line, 'log' => $log,
+            'erg' => $ergText, 'info' => $art . ' · ' . $ergText
+        ];
     }
 
     // =========================================================================
