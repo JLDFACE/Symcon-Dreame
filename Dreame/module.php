@@ -26,11 +26,13 @@
  *   State 2/1, Error 2/2, Akku 3/1, Charging 3/2, Status 4/1, Reinigungszeit 4/2,
  *   Flaeche 4/3, Saugkraft 4/4, Wasser/Moppfeuchte 4/5, Wassertank 4/6, Task 4/7,
  *   CLEANING_PROPERTIES 4/10, Reinigungsmodus 4/23 (gepackt), CUSTOMIZED_CLEANING 4/26,
- *   Warnstatus 4/35, "kein Wasser" 4/41, AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a.
- *   "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a. "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   Behaelter der Station (eigener Status je Behaelter, keine Fuellstaende):
+ *   Frischwasser 27/1, Schmutzwasser 27/2, Staubbeutel 27/3, Reinigungsmittel 27/4.
  *   Verschleiss (je Teil piid 1 = Rest in Stunden bzw. Prozent, piid 2 = das jeweils andere):
  *   Hauptbuerste 9/2 %, Seitenbuerste 10/2 %, Filter 11/1 %, Sensoren 16/1 %,
- *   zwei weitere Teile 30/2 % und 31/2 % (Zuordnung am Geraet noch offen, siehe Variablennamen).
+ *   Antriebsraeder 30/2 %, Kalkschutz 31/2 %.
+ *   siid 27, 30 und 31 stehen NUR im Zweig "dev" der Referenz-Implementierung.
  *   Aktionen: Alles=2/1, Pause=2/2, ZurBasis=3/1, RaumStart=4/1, Stop=4/2, WarnungLoeschen=4/3, Orten=7/1, Kartenwechsel=6/2.
  *
  * Aktueller Raum: das Geraet legt die LIVE-Karte als OSS-Objekt neben der Kartenliste ab -
@@ -92,26 +94,31 @@ class DREAME extends IPSModule
         $this->RegisterVariableInteger('CleaningTime', 'Reinigungszeit (min)', '', 60);
         $this->RegisterVariableFloat('CleaningArea', 'Gereinigte Fläche (m²)', '', 70);
 
-        // ---- Behaelter / Station ----
-        // Das Geraet meldet KEINE Fuellstaende in Prozent fuer Staubbeutel, Frisch- und
-        // Schmutzwasser, sondern nur Warnungen: als Warnstatus (4/35) bzw. als Fehlercode
-        // (2/2). "Hinweis" zeigt den Klartext, die drei Schalter machen ihn auswertbar.
-        $this->RegisterVariableString('WarnText', 'Hinweis', '', 71);
-        IPS_SetIcon($this->GetIDForIdent('WarnText'), 'Information');
-        // Eigenes Profil statt ~Alert: "Alarm" ist fuer einen vollen Staubbeutel zu laut,
-        // und die Visu soll den Zustand im Klartext zeigen.
-        if (!IPS_VariableProfileExists('DREAME.Behaelter')) {
-            IPS_CreateVariableProfile('DREAME.Behaelter', 0);
-            IPS_SetVariableProfileIcon('DREAME.Behaelter', 'Information');
-        }
-        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 0, 'in Ordnung', '', -1);
-        IPS_SetVariableProfileAssociation('DREAME.Behaelter', 1, 'prüfen', '', 0xC8901E);   // Bernstein, kein Rot
-        $this->RegisterVariableBoolean('BinFull', 'Staubbeutel voll', 'DREAME.Behaelter', 72);
-        $this->DisableAction('BinFull');
-        $this->RegisterVariableBoolean('WaterEmpty', 'Frischwasser leer', 'DREAME.Behaelter', 73);
-        $this->DisableAction('WaterEmpty');
-        $this->RegisterVariableBoolean('DirtyFull', 'Schmutzwasser voll', 'DREAME.Behaelter', 74);
-        $this->DisableAction('DirtyFull');
+        // ---- Behaelter der Station ----
+        // Es gibt KEINE Fuellstaende in Prozent, aber je Behaelter einen eigenen Status
+        // (siid 27, piid 1..4). Die Codes stammen aus der Referenz-Implementierung
+        // (Tasshack/dreame-vacuum, Zweig dev - der Zweig "master" kennt siid 27 noch nicht).
+        // Bernstein statt Rot: in dieser Visu gibt es keine Signalfarben.
+        $this->RegisterProfileStatus('DREAME.TankClean', 'Drops', [
+            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'fehlt', 0xC8901E], [2, 'fast leer', 0xC8901E]
+        ]);
+        $this->RegisterProfileStatus('DREAME.TankDirty', 'Drops', [
+            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'voll oder fehlt', 0xC8901E]
+        ]);
+        $this->RegisterProfileStatus('DREAME.DustBag', 'Trashcan', [
+            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'fehlt', 0xC8901E], [2, 'prüfen', 0xC8901E]
+        ]);
+        $this->RegisterProfileStatus('DREAME.Detergent', 'Drops', [
+            [-1, 'unbekannt', -1], [0, 'eingesetzt', -1], [1, 'abgeschaltet', -1], [2, 'fast leer', 0xC8901E]
+        ]);
+        $this->RegisterVariableInteger('TankClean', 'Frischwassertank', 'DREAME.TankClean', 72);
+        $this->DisableAction('TankClean');
+        $this->RegisterVariableInteger('TankDirty', 'Schmutzwassertank', 'DREAME.TankDirty', 73);
+        $this->DisableAction('TankDirty');
+        $this->RegisterVariableInteger('DustBag', 'Staubbeutel', 'DREAME.DustBag', 74);
+        $this->DisableAction('DustBag');
+        $this->RegisterVariableInteger('Detergent', 'Reinigungsmittel', 'DREAME.Detergent', 75);
+        $this->DisableAction('Detergent');
 
         // ---- Verschleissteile (Restwert in Prozent) ----
         $this->RegisterProfileInteger('DREAME.Wear', 'Gauge', '', ' %', 0, 100, 1);
@@ -123,13 +130,13 @@ class DREAME extends IPSModule
         $this->DisableAction('WearFilter');
         $this->RegisterVariableInteger('WearSensor', 'Sensoren', 'DREAME.Wear', 143);
         $this->DisableAction('WearSensor');
-        // Zwei weitere Teile meldet der X50 unter siid 30 und 31. Welches Teil das jeweils
-        // ist, sagt die Cloud nicht (die Klartextdatei des Geraets kennt nur Zustandstexte)
-        // - Namen erst setzen, wenn der Abgleich mit der App das bestaetigt.
-        $this->RegisterVariableInteger('Wear30', 'Verbrauchsteil 1', 'DREAME.Wear', 144);
-        $this->DisableAction('Wear30');
-        $this->RegisterVariableInteger('Wear31', 'Verbrauchsteil 2', 'DREAME.Wear', 145);
-        $this->DisableAction('Wear31');
+        // siid 30 = Antriebsraeder reinigen, siid 31 = Kalkschutzmittel. Beide fehlen im
+        // Zweig "master" der Referenz-Implementierung und stehen erst im Zweig "dev"
+        // (WHEEL_DIRTY_LEFT 30/2, SCALE_INHIBITOR_LEFT 31/2).
+        $this->RegisterVariableInteger('WearWheels', 'Antriebsräder', 'DREAME.Wear', 144);
+        $this->DisableAction('WearWheels');
+        $this->RegisterVariableInteger('WearScale', 'Kalkschutz', 'DREAME.Wear', 145);
+        $this->DisableAction('WearScale');
 
         // ---- Steuerung: Aktion (Dropdown) ----
         $this->RegisterProfileInteger('DREAME.Action', 'Execute', '', '', 0, 0, 0);
@@ -266,6 +273,14 @@ class DREAME extends IPSModule
 
         // Historie-Variablen an die eingestellte Anzahl anpassen
         $this->SyncHistoryVariables();
+
+        // Zwischenstand von Build 10 abräumen: die Behaelter kamen dort aus Warncodes
+        // (drei Boolesche + Klartextzeile), seit Build 11 aus siid 27. Die alten Namen
+        // "Verbrauchsteil 1/2" heissen jetzt Antriebsräder und Kalkschutz.
+        foreach (['WarnText', 'BinFull', 'WaterEmpty', 'DirtyFull', 'Wear30', 'Wear31'] as $alt) {
+            if (@$this->GetIDForIdent($alt)) $this->UnregisterVariable($alt);
+        }
+        if (IPS_VariableProfileExists('DREAME.Behaelter')) @IPS_DeleteVariableProfile('DREAME.Behaelter');
 
         // Anzeigetexte, die nur beim Poll gefuellt werden, nicht leer stehen lassen
         if (GetValueString($this->GetIDForIdent('CurrentRoom')) == '') $this->SetValueStringSafe('CurrentRoom', '—');
@@ -985,8 +1000,9 @@ class DREAME extends IPSModule
             if ($this->EnsureDevice(false) === false) { $this->SetOnline(false, 'Kein Geraet.'); return; }
 
             $p = $this->GetProperties([
-                [2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 35], [4, 41], [4, 50],
-                [9, 2], [10, 2], [11, 1], [16, 1], [30, 2], [31, 2]
+                [2, 1], [2, 2], [3, 1], [4, 2], [4, 3], [4, 23], [4, 26], [4, 50],
+                [9, 2], [10, 2], [11, 1], [16, 1], [30, 2], [31, 2],
+                [27, 1], [27, 2], [27, 3], [27, 4]
             ]);
             if (count($p) == 0) { $this->SetOnline(false, 'Keine Statusantwort.'); return; }
             $this->SetOnline(true, '');
@@ -1019,18 +1035,14 @@ class DREAME extends IPSModule
             if (isset($p['10.2'])) $this->SetValueIntegerSafe('WearSideBrush', intval($p['10.2']));
             if (isset($p['11.1'])) $this->SetValueIntegerSafe('WearFilter', intval($p['11.1']));
             if (isset($p['16.1'])) $this->SetValueIntegerSafe('WearSensor', intval($p['16.1']));
-            if (isset($p['30.2'])) $this->SetValueIntegerSafe('Wear30', intval($p['30.2']));
-            if (isset($p['31.2'])) $this->SetValueIntegerSafe('Wear31', intval($p['31.2']));
+            if (isset($p['30.2'])) $this->SetValueIntegerSafe('WearWheels', intval($p['30.2']));
+            if (isset($p['31.2'])) $this->SetValueIntegerSafe('WearScale', intval($p['31.2']));
 
-            // Behaelter: das Geraet meldet nur Warnungen, keine Fuellstaende
-            $warn = isset($p['4.35']) ? intval($p['4.35']) : 0;
-            $err  = isset($p['2.2']) ? intval($p['2.2']) : 0;
-            $noWater = isset($p['4.41']) ? intval($p['4.41']) : 0;
-            $this->SetValueStringSafe('WarnText', $warn == 0 ? '—' : $this->ErrorText($warn));
-            $codes = [$warn, $err];
-            $this->SetValueBooleanSafe('BinFull', $this->AnyCode($codes, [11, 101, 102, 103, 104, 121]));
-            $this->SetValueBooleanSafe('WaterEmpty', $noWater == 1 || $this->AnyCode($codes, [10, 105, 107, 116, 123, 213]));
-            $this->SetValueBooleanSafe('DirtyFull', $this->AnyCode($codes, [106, 108, 109, 110, 118, 214, 227]));
+            // Behaelter der Station: je einer einen eigenen Status (siid 27)
+            $this->SetValueIntegerSafe('TankClean', isset($p['27.1']) ? intval($p['27.1']) : -1);
+            $this->SetValueIntegerSafe('TankDirty', isset($p['27.2']) ? intval($p['27.2']) : -1);
+            $this->SetValueIntegerSafe('DustBag',   isset($p['27.3']) ? intval($p['27.3']) : -1);
+            $this->SetValueIntegerSafe('Detergent', isset($p['27.4']) ? intval($p['27.4']) : -1);
 
             // Aktueller Raum + Nachlaufliste
             if ($state != -1) {
@@ -1043,12 +1055,16 @@ class DREAME extends IPSModule
         }
     }
 
-    private function AnyCode($values, $codes)
+    // Statusprofil mit festen Assoziationen: [[wert, text, farbe], ...]
+    private function RegisterProfileStatus($name, $icon, $assocs)
     {
-        foreach ($values as $v) {
-            if ($v != 0 && in_array(intval($v), $codes, true)) return true;
+        if (!IPS_VariableProfileExists($name)) {
+            IPS_CreateVariableProfile($name, 1);
+            IPS_SetVariableProfileIcon($name, $icon);
         }
-        return false;
+        $out = [];
+        foreach ($assocs as $a) $out[] = [$a[0], $a[1], '', $a[2]];
+        $this->SetAssociations($name, $out);
     }
 
     // =========================================================================
