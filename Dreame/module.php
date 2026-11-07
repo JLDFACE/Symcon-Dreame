@@ -26,7 +26,7 @@
  *   State 2/1, Error 2/2, Akku 3/1, Charging 3/2, Status 4/1, Reinigungszeit 4/2,
  *   Flaeche 4/3, Saugkraft 4/4, Wasser/Moppfeuchte 4/5, Wassertank 4/6, Task 4/7,
  *   CLEANING_PROPERTIES 4/10, Reinigungsmodus 4/23 (gepackt), CUSTOMIZED_CLEANING 4/26,
- *   AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a. "CleanRoute"), MAP_EXTEND 6/4, MAP_LIST 6/8.
+ *   AUTO_SWITCH_SETTINGS 4/50 (JSON k/v, u. a. "CleanRoute", CleanGenius "SmartHost"), MAP_EXTEND 6/4, MAP_LIST 6/8.
  *   Behaelter der Station (eigener Status je Behaelter, keine Fuellstaende):
  *   Frischwasser 27/1, Schmutzwasser 27/2, Staubbeutel 27/3, Reinigungsmittel 27/4.
  *   Verschleiss (je Teil piid 1 = Rest in Stunden bzw. Prozent, piid 2 = das jeweils andere):
@@ -75,6 +75,7 @@ class DREAME extends IPSModule
         $this->RegisterAttributeInteger('WasBusy', 0);              // 1, solange der letzte Poll einen laufenden Auftrag sah
         $this->RegisterAttributeString('Queue', '[]');              // vorgemerkte Raumcodes (Nachlaufliste)
         $this->RegisterAttributeString('HistRooms', '{}');           // Startzeit => gereinigte Raeume (Cache)
+        $this->RegisterAttributeInteger('CleanGeniusRestore', -1);  // CleanGenius vor dem Auftrag, -1 = nichts wiederherzustellen
 
         // ---- Buffers ----
         $this->SetBuffer('FastUntil', '0');
@@ -565,7 +566,7 @@ class DREAME extends IPSModule
             // Vorwahlen (Modus, Saugkraft, Feuchte, Route) vor dem Start setzen
             $this->ApplyRunSettings();
             $r = $this->Action(2, 1, []);
-            if ($r === false) { $this->SetOnline(false, 'Aktion fehlgeschlagen (2/1).'); return false; }
+            if ($r === false) { $this->RestoreCleanGenius(); $this->SetOnline(false, 'Aktion fehlgeschlagen (2/1).'); return false; }
             $this->SetOnline(true, '');
             $this->BumpFastPoll();
             return true;
@@ -648,7 +649,7 @@ class DREAME extends IPSModule
             ];
             $this->SendDebug('CleanRooms', 'map ' . $mapId . ' -> ' . $selects, 0);
             $r = $this->Action(4, 1, $in);
-            if ($r === false) { $this->SetOnline(false, 'Raum-Start fehlgeschlagen.'); return false; }
+            if ($r === false) { $this->RestoreCleanGenius(); $this->SetOnline(false, 'Raum-Start fehlgeschlagen.'); return false; }
             $this->SetOnline(true, '');
             // Start angefordert -> Auswahl wird zurueckgesetzt, sobald der Durchgang durch ist
             $this->WriteAttributeInteger('RoomCleaning', 1);
@@ -1094,7 +1095,10 @@ class DREAME extends IPSModule
                 // Auftrag gerade beendet -> Historie einmal nachziehen (nicht bei jedem Poll).
                 // Laeuft ohne eigenen Lock, weil UpdateStatus den Lock bereits haelt.
                 $busy = in_array($state, $this->BusyStates(), true) ? 1 : 0;
-                if ($busy == 0 && $this->ReadAttributeInteger('WasBusy') == 1) $this->FetchHistory();
+                if ($busy == 0 && $this->ReadAttributeInteger('WasBusy') == 1) {
+                    $this->RestoreCleanGenius();
+                    $this->FetchHistory();
+                }
                 if ($busy != $this->ReadAttributeInteger('WasBusy')) $this->WriteAttributeInteger('WasBusy', $busy);
             }
             if (isset($p['2.2'])) $this->SetValueStringSafe('Fehler', $this->ErrorText(intval($p['2.2'])));
@@ -1347,13 +1351,39 @@ class DREAME extends IPSModule
         if (!isset($map[$mode])) return;
         $bits = $map[$mode];
 
-        $cur = $this->GetProperties([[4, 23]]);
+        $cur = $this->GetProperties([[4, 23], [4, 50]]);
+
+        // CleanGenius ("SmartHost" in 4/50) waehlt den Modus selbst (28/5, z. B. erst kehren,
+        // dann wischen) und uebergeht 4/23 - am X50 lief so "Nur wischen" als Saugen + Wischen.
+        // Fuer den Auftrag abschalten, den alten Wert merken; RestoreCleanGenius() stellt ihn
+        // nach dem Durchgang wieder her. So macht es auch die Referenz bei Zonenreinigung.
+        $cg = isset($cur['4.50']) ? $this->ParseAutoSwitch($cur['4.50'], 'SmartHost') : null;
+        if ($cg !== null && $cg > 0) {
+            if ($this->ReadAttributeInteger('CleanGeniusRestore') < 0) {
+                $this->WriteAttributeInteger('CleanGeniusRestore', $cg);
+            }
+            $this->SetProperties([[4, 50, json_encode(['k' => 'SmartHost', 'v' => 0])]]);
+            $this->SendDebug('CleanGenius', 'aus (war ' . $cg . ')', 0);
+            IPS_Sleep(500);
+        }
+
         if (!isset($cur['4.23'])) return;
         $raw = intval($cur['4.23']);
         $new = ($raw & ~3) | $bits;
         if ($new !== $raw) {
             $this->SetProperties([[4, 23, $new]]);
             IPS_Sleep(500);
+        }
+    }
+
+    // Schaltet CleanGenius wieder auf den Wert vor dem Auftrag (siehe ApplyCleaningMode).
+    private function RestoreCleanGenius()
+    {
+        $cg = $this->ReadAttributeInteger('CleanGeniusRestore');
+        if ($cg < 0) return;
+        if ($this->SetProperties([[4, 50, json_encode(['k' => 'SmartHost', 'v' => $cg])]])) {
+            $this->WriteAttributeInteger('CleanGeniusRestore', -1);
+            $this->SendDebug('CleanGenius', 'wiederhergestellt (' . $cg . ')', 0);
         }
     }
 
