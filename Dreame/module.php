@@ -2035,7 +2035,9 @@ class DREAME extends IPSModule
             101 => 'Erste Tiefenreinigung', 102 => 'Erste Tiefenreinigung pausiert',
             121 => 'Fährt in die Basis', 122 => 'Verlässt die Basis'
         ];
-        return isset($s[$code]) ? ($s[$code] . ' (' . $code . ')') : ('Status ' . $code);
+        // Ohne angehängten Code: „Vollständig geladen (13)“ brach in der iPhone-Visu um.
+        // Unbekannte Codes bleiben als „Status <n>“ sichtbar.
+        return $s[$code] ?? ('Status ' . $code);
     }
 
     // Reinigungsmodus laut Geraet (siid 4 / piid 23). Wert ist gepackt; Modus in den untersten 2 Bits.
