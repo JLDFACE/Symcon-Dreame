@@ -167,13 +167,16 @@ class DREAME extends IPSModule
         // ---- Steuerung: Reinigungsmodus (Dropdown) ----
         // Wird vor dem Start ins Modusfeld (untere 2 Bits) der gepackten Property
         // siid 4 / piid 23 geschrieben (Details siehe ApplyCleaningMode). Am r2532a verifiziert.
+        // 4/5 = CleanGenius Routine/Tief: das Geraet waehlt den Modus selbst (SmartHost in 4/50).
         $this->RegisterProfileInteger('DREAME.CleanMode', 'Brush', '', '', 0, 0, 0);
         $this->SetAssociations('DREAME.CleanMode', [
             [-1, 'Geräteeinstellung belassen', '', -1],
             [0, 'Nur kehren', '', 0x00A000],
             [1, 'Nur wischen', '', 0x0080FF],
             [2, 'Kehren & wischen (zusammen)', '', 0x00A000],
-            [3, 'Erst kehren, dann wischen', '', 0xA0A000]
+            [3, 'Erst kehren, dann wischen', '', 0xA0A000],
+            [4, 'CleanGenius', '', 0x0080FF],
+            [5, 'CleanGenius Tiefenreinigung', '', 0x0080FF]
         ]);
         $this->RegisterVariableInteger('CleanMode', 'Reinigungsmodus', 'DREAME.CleanMode', 85);
         $this->EnableAction('CleanMode');
@@ -1105,7 +1108,13 @@ class DREAME extends IPSModule
             if (isset($p['3.1'])) $this->SetValueIntegerSafe('Battery', intval($p['3.1']));
             if (isset($p['4.2'])) $this->SetValueIntegerSafe('CleaningTime', intval($p['4.2']));
             if (isset($p['4.3'])) $this->SetValueFloatSafe('CleaningArea', floatval($p['4.3']));
-            if (isset($p['4.23'])) $this->SetValueStringSafe('DeviceMode', $this->CleanModeText(intval($p['4.23'])));
+            // Bei aktivem CleanGenius ist 4/23 nicht massgeblich - dann das anzeigen
+            $cg = isset($p['4.50']) ? $this->ParseAutoSwitch($p['4.50'], 'SmartHost') : null;
+            if ($cg !== null && $cg > 0) {
+                $this->SetValueStringSafe('DeviceMode', $cg == 2 ? 'CleanGenius Tiefenreinigung' : 'CleanGenius');
+            } elseif (isset($p['4.23'])) {
+                $this->SetValueStringSafe('DeviceMode', $this->CleanModeText(intval($p['4.23'])));
+            }
             if (isset($p['4.26'])) $this->SetValueBooleanSafe('CustomRoomSettings', intval($p['4.26']) == 1);
             if (isset($p['4.50'])) {
                 $route = $this->ParseAutoSwitch($p['4.50'], 'CleanRoute');
@@ -1346,27 +1355,30 @@ class DREAME extends IPSModule
         $mode = GetValueInteger($this->GetIDForIdent('CleanMode'));
         if ($mode < 0) return; // Geraeteeinstellung belassen
 
-        // Logische Dropdown-Auswahl -> Modus-Bits
+        // Logische Dropdown-Auswahl -> Modus-Bits bzw. CleanGenius-Stufe
         $map = [0 => 2, 1 => 1, 2 => 0, 3 => 3]; // 0 Kehren,1 Wischen,2 Zusammen,3 ErstKehrenDannWischen
-        if (!isset($map[$mode])) return;
-        $bits = $map[$mode];
+        $genius = [4 => 1, 5 => 2];              // 4 CleanGenius Routine, 5 CleanGenius Tiefenreinigung
+        if (!isset($map[$mode]) && !isset($genius[$mode])) return;
+        $wantCg = isset($genius[$mode]) ? $genius[$mode] : 0;
 
         $cur = $this->GetProperties([[4, 23], [4, 50]]);
 
         // CleanGenius ("SmartHost" in 4/50) waehlt den Modus selbst (28/5, z. B. erst kehren,
         // dann wischen) und uebergeht 4/23 - am X50 lief so "Nur wischen" als Saugen + Wischen.
-        // Fuer den Auftrag abschalten, den alten Wert merken; RestoreCleanGenius() stellt ihn
-        // nach dem Durchgang wieder her. So macht es auch die Referenz bei Zonenreinigung.
+        // Fuer den Auftrag auf die gewaehlte Stufe stellen (bei festem Modus: aus), den alten
+        // Wert merken; RestoreCleanGenius() stellt ihn nach dem Durchgang wieder her.
         $cg = isset($cur['4.50']) ? $this->ParseAutoSwitch($cur['4.50'], 'SmartHost') : null;
-        if ($cg !== null && $cg > 0) {
+        if ($cg !== null && $cg != $wantCg) {
             if ($this->ReadAttributeInteger('CleanGeniusRestore') < 0) {
                 $this->WriteAttributeInteger('CleanGeniusRestore', $cg);
             }
-            $this->SetProperties([[4, 50, json_encode(['k' => 'SmartHost', 'v' => 0])]]);
-            $this->SendDebug('CleanGenius', 'aus (war ' . $cg . ')', 0);
+            $this->SetProperties([[4, 50, json_encode(['k' => 'SmartHost', 'v' => $wantCg])]]);
+            $this->SendDebug('CleanGenius', $wantCg . ' (war ' . $cg . ')', 0);
             IPS_Sleep(500);
         }
+        if ($wantCg > 0) return; // Modus bestimmt CleanGenius selbst
 
+        $bits = $map[$mode];
         if (!isset($cur['4.23'])) return;
         $raw = intval($cur['4.23']);
         $new = ($raw & ~3) | $bits;
